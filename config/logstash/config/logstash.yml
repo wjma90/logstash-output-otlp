@@ -1,0 +1,3 @@
+node.name: docker
+api.environment: local
+log.level: info

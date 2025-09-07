@@ -1,0 +1,12 @@
+services:
+  logstash:
+    build: .
+    volumes:
+#      - "./config/logstash/logstash.conf:/usr/share/logstash/pipeline/logstash.conf"
+      - ./config/logstash/pipeline:/usr/share/logstash/pipeline/
+      - ./config/logstash/config:/usr/share/logstash/config/
+  otel:
+    image: otel/opentelemetry-collector-contrib:0.131.0
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - "./config/otel/otel.yaml:/etc/otel/config.yaml"

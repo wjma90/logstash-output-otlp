@@ -1,0 +1,51 @@
+LOGSTASH_VERSION := 9.0.0
+VERSION := 0.0.1.snapshot
+ASSETSDIR := assets
+LOGSTASH_PATH := $(ASSETSDIR)/logstash-$(LOGSTASH_VERSION)
+LOGSTASH_CORE_PATH := $(LOGSTASH_PATH)/logstash-core
+LOGSTASH_CORE_JAR := $(LOGSTASH_CORE_PATH)/build/libs/logstash-core-$(LOGSTASH_VERSION).jar
+PLUGIN_JAR := build/libs/logstash-output-otlp-$(VERSION).jar
+GEM_FILE := logstash-output-otlp-$(VERSION).gem
+
+all: gem
+
+gem: $(GEM_FILE)
+
+$(GEM_FILE): VERSION gradle.properties logstashcorejar
+	./gradlew gem
+
+VERSION:
+	@echo $(VERSION) > VERSION
+
+$(PLUGIN_JAR): logstashcorejar gradle.properties
+	./gradlew assemble
+
+build: $(PLUGIN_JAR)
+
+logstashcorejar: $(LOGSTASH_CORE_JAR)
+
+$(LOGSTASH_CORE_JAR): $(LOGSTASH_PATH)
+	cd $(LOGSTASH_PATH); ./gradlew assemble
+
+$(LOGSTASH_PATH): $(ASSETSDIR)/v$(LOGSTASH_VERSION).zip
+	unzip -q -d $(ASSETSDIR) $(ASSETSDIR)/v$(LOGSTASH_VERSION).zip
+	touch $@
+
+gradle.properties:
+	@echo LOGSTASH_VERSION=$(LOGSTASH_VERSION) >> $@
+	@echo LOGSTASH_CORE_PATH=$(PWD)/$(LOGSTASH_CORE_PATH) >> $@
+	@echo LOGSTASH_JAR=$(LOGSTASH_PATH)/build/libs/logstash-$(LOGSTASH_VERSION).jar >> $@
+
+$(ASSETSDIR)/v$(LOGSTASH_VERSION).zip:
+	@mkdir -p $(@D)
+	curl -s -L  https://github.com/elastic/logstash/archive/refs/tags/v$(LOGSTASH_VERSION).zip -o $@
+
+clean:
+	@rm $(LOGSTASH_CORE_PATH)/build/libs/*.jar
+	@rm gradle.properties
+	@rm *.gem
+	@rm build/libs/logstash-output-otlp-*.jar
+	@rm VERSION
+
+clean-all: clean
+	@rm -rf $(ASSETSDIR) build vendor lib
