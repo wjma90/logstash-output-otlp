@@ -18,9 +18,13 @@ import io.opentelemetry.sdk.logs.export.LogRecordExporter;
 import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
 import io.opentelemetry.sdk.resources.Resource;
 import org.logstash.ConvertedList;
+
+import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
 import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 
@@ -36,6 +40,8 @@ public class Otlp implements Output {
             PluginConfigSpec.stringSetting("protocol", "", false, false);
     public static final PluginConfigSpec<String> COMPRESSION_CONFIG =
             PluginConfigSpec.stringSetting("compression", "none");
+    public static final PluginConfigSpec<String> SSL_CERTIFICATE_AUTHORITIES =
+            PluginConfigSpec.stringSetting("ssl_certificate_authorities", null);
 
     public static final PluginConfigSpec<Map<String, Object>>  ATTRIBUTES_CONFIG = PluginConfigSpec.hashSetting("attributes",null, false, false);
     public static final PluginConfigSpec<Map<String, Object>> RESOURCE_CONFIG = PluginConfigSpec.hashSetting("resource", null, false, false);
@@ -170,17 +176,42 @@ public class Otlp implements Output {
     private LogRecordExporter logExporterForConfig(Configuration configuration) {
         URI endpoint = configuration.get(ENDPOINT_CONFIG);
         String compression = configuration.get(COMPRESSION_CONFIG);
+        String caPath = configuration.get(SSL_CERTIFICATE_AUTHORITIES);
 
-        if(protocolForConfig(configuration).equals(VALID_PROTOCOL_OPTIONS.http.name())) {
-            return OtlpHttpLogRecordExporter.builder()
-                    .setEndpoint(endpoint.toString())
-                    .setCompression(compression)
-                    .build();
+        if (caPath == null || caPath.isBlank()) {
+            if (protocolForConfig(configuration).equals(VALID_PROTOCOL_OPTIONS.http.name())) {
+                return OtlpHttpLogRecordExporter.builder()
+                        .setEndpoint(endpoint.toString())
+                        .setCompression(compression)
+                        .build();
+            } else {
+                return OtlpGrpcLogRecordExporter.builder()
+                        .setEndpoint(endpoint.toString())
+                        .setCompression(compression)
+                        .build();
+            }
+        } else {
+            byte[] caBytes = null;
+            try {
+                caBytes = Files.readAllBytes(Paths.get(caPath));
+            } catch (IOException e) {
+                throw new IllegalArgumentException("Cannot read CA file: " + caPath, e);
+            }
+
+            if (protocolForConfig(configuration).equals(VALID_PROTOCOL_OPTIONS.http.name())) {
+                return OtlpHttpLogRecordExporter.builder()
+                        .setEndpoint(endpoint.toString())
+                        .setCompression(compression)
+                        .setTrustedCertificates(caBytes)
+                        .build();
+            } else {
+                return OtlpGrpcLogRecordExporter.builder()
+                        .setEndpoint(endpoint.toString())
+                        .setCompression(compression)
+                        .setTrustedCertificates(caBytes)
+                        .build();
+            }
         }
-        return OtlpGrpcLogRecordExporter.builder()
-                .setEndpoint(endpoint.toString())
-                .setCompression(compression)
-                .build();
     }
 
     Attributes getResourceAttributes() {
@@ -253,7 +284,8 @@ public class Otlp implements Output {
                 TRACE_FLAGS_CONFIG,
                 TRACE_ID_CONFIG,
                 SPAN_ID_CONFIG,
-                SEVERITY_TEXT_CONFIG
+                SEVERITY_TEXT_CONFIG,
+                SSL_CERTIFICATE_AUTHORITIES
         ));
     }
 

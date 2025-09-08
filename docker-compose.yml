@@ -5,8 +5,10 @@ services:
 #      - "./config/logstash/logstash.conf:/usr/share/logstash/pipeline/logstash.conf"
       - ./config/logstash/pipeline:/usr/share/logstash/pipeline/
       - ./config/logstash/config:/usr/share/logstash/config/
+      - ./config/tls/ca.crt:/etc/otel/ca.crt:ro
   otel:
     image: otel/opentelemetry-collector-contrib:0.131.0
     command: ["--config=/etc/otel/config.yaml"]
     volumes:
       - "./config/otel/otel.yaml:/etc/otel/config.yaml"
+      - "./config/tls:/etc/otel/certs"

@@ -1,10 +1,16 @@
 receivers:
   otlp:
     protocols:
-      http:
-        endpoint: 0.0.0.0:4318
       grpc:
         endpoint: 0.0.0.0:4317
+        tls:
+          cert_file: /etc/otel/certs/certificate.crt
+          key_file: /etc/otel/certs/certificate.key
+      http:
+        endpoint: 0.0.0.0:4318
+        tls:
+          cert_file: /etc/otel/certs/certificate.crt
+          key_file: /etc/otel/certs/certificate.key
 
 exporters:
   debug:
