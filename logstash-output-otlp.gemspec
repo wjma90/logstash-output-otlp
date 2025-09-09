@@ -7,7 +7,7 @@ Gem::Specification.new do |s|
   s.description     = 'A Logstash output plugin that allows logs to be output to OpenTelemetry otlp endpoints.'
   s.authors         = ['Willian Marchan']
   s.email           = ['w.marchanaranda@gmail.com']
-  s.homepage        = 'https://github.com/wjma90/logstash-output-opentelemetry'
+  s.homepage        = 'https://github.com/wjma90/logstash-output-otlp'
   s.platform        = 'java'
   s.require_paths = ['lib', 'vendor/jar-dependencies']
 

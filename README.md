@@ -1,6 +1,6 @@
 # Logstash Output Plugin for OpenTelemetry
 
-[![Java CI with Gradle](https://github.com/wjma90/logstash-output-opentelemetry/actions/workflows/gradle.yml/badge.svg)](https://github.com/wjma90/logstash-output-opentelemetry/actions/workflows/gradle.yml)
+[![Java CI with Gradle](https://github.com/wjma90/logstash-output-otlp/actions/workflows/gradle.yml/badge.svg)](https://github.com/wjma90/logstash-output-otlp/actions/workflows/gradle.yml)
 
 This is a Java-based plugin for [Logstash](https://github.com/elastic/logstash).
 
