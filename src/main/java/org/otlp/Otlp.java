@@ -10,7 +10,9 @@ import io.opentelemetry.api.trace.SpanContext;
 import io.opentelemetry.api.trace.TraceFlags;
 import io.opentelemetry.api.trace.TraceState;
 import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporter;
+import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporterBuilder;
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporter;
+import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporterBuilder;
 import io.opentelemetry.sdk.logs.LogRecordProcessor;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.export.BatchLogRecordProcessor;
@@ -19,12 +21,16 @@ import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
 import io.opentelemetry.sdk.resources.Resource;
 import org.logstash.ConvertedList;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.security.cert.X509Certificate;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 
@@ -42,6 +48,8 @@ public class Otlp implements Output {
             PluginConfigSpec.stringSetting("compression", "none");
     public static final PluginConfigSpec<String> SSL_CERTIFICATE_AUTHORITIES =
             PluginConfigSpec.stringSetting("ssl_certificate_authorities", null);
+    public static final PluginConfigSpec<Boolean> SSL_DISABLE_TLS_VERIFICATION =
+            PluginConfigSpec.booleanSetting("ssl_disable_tls_verification", false);
 
     public static final PluginConfigSpec<Map<String, Object>>  ATTRIBUTES_CONFIG = PluginConfigSpec.hashSetting("attributes",null, false, false);
     public static final PluginConfigSpec<Map<String, Object>> RESOURCE_CONFIG = PluginConfigSpec.hashSetting("resource", null, false, false);
@@ -177,40 +185,33 @@ public class Otlp implements Output {
         URI endpoint = configuration.get(ENDPOINT_CONFIG);
         String compression = configuration.get(COMPRESSION_CONFIG);
         String caPath = configuration.get(SSL_CERTIFICATE_AUTHORITIES);
+        Boolean sslDisableTlsVerification = configuration.get(SSL_DISABLE_TLS_VERIFICATION);
+        SSLContext sslContext = sslDisableTlsVerification ? getInsecureSSLContext() : null;
 
-        if (caPath == null || caPath.isBlank()) {
-            if (protocolForConfig(configuration).equals(VALID_PROTOCOL_OPTIONS.http.name())) {
-                return OtlpHttpLogRecordExporter.builder()
-                        .setEndpoint(endpoint.toString())
-                        .setCompression(compression)
-                        .build();
-            } else {
-                return OtlpGrpcLogRecordExporter.builder()
-                        .setEndpoint(endpoint.toString())
-                        .setCompression(compression)
-                        .build();
-            }
+        System.out.println("sslDisableTlsVerification: " + sslDisableTlsVerification);
+
+        byte[] caFile = caPath == null ? null :getSSLCertificateAuthority(caPath);
+
+        if (protocolForConfig(configuration).equals(VALID_PROTOCOL_OPTIONS.http.name())) {
+            OtlpHttpLogRecordExporterBuilder builder = OtlpHttpLogRecordExporter.builder();
+
+            builder.setEndpoint(endpoint.toString())
+                    .setCompression(compression);
+
+            if(!sslDisableTlsVerification && caFile != null && caFile.length > 0)  builder.setTrustedCertificates(caFile);
+            if(sslDisableTlsVerification) builder.setSslContext(sslContext, getInsecureSSLTrustManager());
+
+            return builder.build();
         } else {
-            byte[] caBytes = null;
-            try {
-                caBytes = Files.readAllBytes(Paths.get(caPath));
-            } catch (IOException e) {
-                throw new IllegalArgumentException("Cannot read CA file: " + caPath, e);
-            }
+            OtlpGrpcLogRecordExporterBuilder builder = OtlpGrpcLogRecordExporter.builder();
 
-            if (protocolForConfig(configuration).equals(VALID_PROTOCOL_OPTIONS.http.name())) {
-                return OtlpHttpLogRecordExporter.builder()
-                        .setEndpoint(endpoint.toString())
-                        .setCompression(compression)
-                        .setTrustedCertificates(caBytes)
-                        .build();
-            } else {
-                return OtlpGrpcLogRecordExporter.builder()
-                        .setEndpoint(endpoint.toString())
-                        .setCompression(compression)
-                        .setTrustedCertificates(caBytes)
-                        .build();
-            }
+            builder.setEndpoint(endpoint.toString())
+                    .setCompression(compression);
+
+            if(!sslDisableTlsVerification && caFile != null && caFile.length > 0)  builder.setTrustedCertificates(caFile);
+            if(sslDisableTlsVerification) builder.setSslContext(sslContext, getInsecureSSLTrustManager());
+
+            return builder.build();
         }
     }
 
@@ -249,6 +250,36 @@ public class Otlp implements Output {
                 .build();
     }
 
+    private SSLContext getInsecureSSLContext() {
+        SSLContext sslContext = null;
+
+        try {
+            sslContext = javax.net.ssl.SSLContext.getInstance("TLS");
+            sslContext.init(null, new X509TrustManager[]{getInsecureSSLTrustManager()}, new java.security.SecureRandom());
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create insecure SSLContext", e);
+        }
+        return sslContext;
+    }
+
+    private X509TrustManager getInsecureSSLTrustManager() {
+        return new X509TrustManager() {
+                    public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+                    public void checkClientTrusted(X509Certificate[] certs, String authType) {}
+                    public void checkServerTrusted(X509Certificate[] certs, String authType) {}
+                };
+    }
+
+    private byte[] getSSLCertificateAuthority(String caPath) {
+        byte[] caBytes = null;
+        try {
+            caBytes = Files.readAllBytes(Paths.get(caPath));
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Cannot read CA file: " + caPath, e);
+        }
+        return caBytes;
+    }
+
     @Override
     public void output(final Collection<Event> events) {
         Iterator<Event> z = events.iterator();
@@ -285,7 +316,8 @@ public class Otlp implements Output {
                 TRACE_ID_CONFIG,
                 SPAN_ID_CONFIG,
                 SEVERITY_TEXT_CONFIG,
-                SSL_CERTIFICATE_AUTHORITIES
+                SSL_CERTIFICATE_AUTHORITIES,
+                SSL_DISABLE_TLS_VERIFICATION
         ));
     }
 
