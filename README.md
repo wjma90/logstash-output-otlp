@@ -24,7 +24,7 @@ All other fields are attached as Attributes.
 `logstash-plugin install logstash-output-otlp`
 
 ## Usage
-
+### Basic
 ```
 input {
     generator {
@@ -45,21 +45,67 @@ output {
 }
 ```
 
+### TLS with Otel Collector + SelfSigned Certificate
+```
+input {
+    generator {
+        count => 10
+        add_field => {
+            "log.level" => "WARN"
+            "trace.id" => "5b8aa5a2d2c872e8321cf37308d69df2"
+            "span.id" => "051581bf3cb55c13"
+        }
+    }
+}
+output {
+    otlp {
+        endpoint => "https://otel:4317"
+        protocol => "grpc"
+        compression => "none"
+        ssl_certificate_authorities => "/etc/otel/ca.crt"
+    }
+}
+```
+
+### TLS with Tls Verification Disabled
+```
+input {
+    generator {
+        count => 10
+        add_field => {
+            "log.level" => "WARN"
+            "trace.id" => "5b8aa5a2d2c872e8321cf37308d69df2"
+            "span.id" => "051581bf3cb55c13"
+        }
+    }
+}
+output {
+    otlp {
+        endpoint => "https://otel:4317"
+        protocol => "grpc"
+        compression => "none"
+        ssl_disable_tls_verification => true
+    }
+}
+```
+
 ## Options
 
-| Setting | Input Type | Required |
-|:--|:--|:--|
-| endpoint | [uri](https://www.elastic.co/guide/en/logstash/current/configuration-file-structure.html#uri) | Yes |
-| endpoint_type | [string](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string) | No (Deprecated) |
+| Setting | Input Type                                                                                                                | Required |
+|:--|:--------------------------------------------------------------------------------------------------------------------------|:--|
+| endpoint | [uri](https://www.elastic.co/guide/en/logstash/current/configuration-file-structure.html#uri)                             | Yes |
+| endpoint_type | [string](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string)                          | No (Deprecated) |
 | protocol | [string](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string), one of ["grpc", "http"] | No |
 | compression | [string](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string), one of ["gzip", "none"] | No |
-| resource | [Hash](https://www.elastic.co/guide/en/logstash/latest/configuration-file-structure.html#hash) | No |
-| body | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference) | No |
-| name | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference) | No |
-| severity_text | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference) | No |
-| trace_id | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference) | No |
-| span_id | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference) | No |
-| trace_flags | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference) | No |
+| ssl_disable_tls_verification | [boolean](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string)                         | No |
+| ssl_certificate_authorities | [string](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string)                          | No |
+| resource | [Hash](https://www.elastic.co/guide/en/logstash/latest/configuration-file-structure.html#hash)                            | No |
+| body | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)        | No |
+| name | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)        | No |
+| severity_text | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)        | No |
+| trace_id | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)        | No |
+| span_id | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)        | No |
+| trace_flags | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)        | No |
 
 `endpoint`
 
@@ -86,6 +132,22 @@ Possible values are `grpc` or `http`
 - Default is: `none`
 
 Possible values are `gzip` or `none`
+
+`ssl_disable_tls_verification`
+
+- Value type is [boolean](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string)
+- Default is: `false`
+
+Use this field when you want to disable tls certificate verification.
+The `ssl_certificate_authorities` field is ignored.
+
+`ssl_certificate_authorities`
+
+- Value type is [string](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string)
+- Default is: `null`
+
+Use this field when you want to add a CA certificate.
+This field is ignored when `ssl_disable_tls_verification => true` is set.
 
 `resource`
 
@@ -136,4 +198,4 @@ The field to reference as the [Otel Trace Flags field](https://opentelemetry.io/
 
 ## Notes
 
-**Warning** This plugin depends on OpenTelemetry logging libraries are that are alpha quality.
+**Warning** This plugin depends on OpenTelemetry logging libraries.
