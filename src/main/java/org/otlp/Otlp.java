@@ -33,6 +33,7 @@ import java.nio.file.Paths;
 import java.security.cert.X509Certificate;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 // class name must match plugin name
 @LogstashPlugin(name = "otlp")
@@ -50,6 +51,10 @@ public class Otlp implements Output {
             PluginConfigSpec.stringSetting("ssl_certificate_authorities", null);
     public static final PluginConfigSpec<Boolean> SSL_DISABLE_TLS_VERIFICATION =
             PluginConfigSpec.booleanSetting("ssl_disable_tls_verification", false);
+    public static final PluginConfigSpec<Long> CONNECT_TIMEOUT =
+            PluginConfigSpec.numSetting("connect_timeout", 10);
+    public static final PluginConfigSpec<Long> TIMEOUT =
+            PluginConfigSpec.numSetting("timeout", 10);
 
     public static final PluginConfigSpec<Map<String, Object>>  ATTRIBUTES_CONFIG = PluginConfigSpec.hashSetting("attributes",null, false, false);
     public static final PluginConfigSpec<Map<String, Object>> RESOURCE_CONFIG = PluginConfigSpec.hashSetting("resource", null, false, false);
@@ -188,12 +193,17 @@ public class Otlp implements Output {
         Boolean sslDisableTlsVerification = configuration.get(SSL_DISABLE_TLS_VERIFICATION);
         SSLContext sslContext = sslDisableTlsVerification ? getInsecureSSLContext() : null;
 
+        Long connectTimeout = configuration.get(CONNECT_TIMEOUT);
+        Long timeout = configuration.get(CONNECT_TIMEOUT);
+
         byte[] caFile = caPath == null ? null :getSSLCertificateAuthority(caPath);
 
         if (protocolForConfig(configuration).equals(VALID_PROTOCOL_OPTIONS.http.name())) {
             OtlpHttpLogRecordExporterBuilder builder = OtlpHttpLogRecordExporter.builder();
 
             builder.setEndpoint(endpoint.toString())
+                    .setConnectTimeout(connectTimeout, TimeUnit.SECONDS)
+                    .setTimeout(timeout, TimeUnit.SECONDS)
                     .setCompression(compression);
 
             if(!sslDisableTlsVerification && caFile != null && caFile.length > 0)  builder.setTrustedCertificates(caFile);
@@ -204,6 +214,8 @@ public class Otlp implements Output {
             OtlpGrpcLogRecordExporterBuilder builder = OtlpGrpcLogRecordExporter.builder();
 
             builder.setEndpoint(endpoint.toString())
+                    .setConnectTimeout(connectTimeout, TimeUnit.SECONDS)
+                    .setTimeout(timeout, TimeUnit.SECONDS)
                     .setCompression(compression);
 
             if(!sslDisableTlsVerification && caFile != null && caFile.length > 0)  builder.setTrustedCertificates(caFile);
@@ -315,7 +327,9 @@ public class Otlp implements Output {
                 SPAN_ID_CONFIG,
                 SEVERITY_TEXT_CONFIG,
                 SSL_CERTIFICATE_AUTHORITIES,
-                SSL_DISABLE_TLS_VERIFICATION
+                SSL_DISABLE_TLS_VERIFICATION,
+                CONNECT_TIMEOUT,
+                TIMEOUT
         ));
     }
 

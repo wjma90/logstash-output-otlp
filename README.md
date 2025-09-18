@@ -91,21 +91,23 @@ output {
 
 ## Options
 
-| Setting | Input Type                                                                                                                | Required |
-|:--|:--------------------------------------------------------------------------------------------------------------------------|:--|
-| endpoint | [uri](https://www.elastic.co/guide/en/logstash/current/configuration-file-structure.html#uri)                             | Yes |
-| endpoint_type | [string](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string)                          | No (Deprecated) |
-| protocol | [string](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string), one of ["grpc", "http"] | No |
-| compression | [string](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string), one of ["gzip", "none"] | No |
-| ssl_disable_tls_verification | [boolean](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string)                         | No |
-| ssl_certificate_authorities | [string](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string)                          | No |
-| resource | [Hash](https://www.elastic.co/guide/en/logstash/latest/configuration-file-structure.html#hash)                            | No |
-| body | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)        | No |
-| name | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)        | No |
-| severity_text | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)        | No |
-| trace_id | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)        | No |
-| span_id | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)        | No |
-| trace_flags | [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)        | No |
+| Setting                      | Input Type                                                                                                                | Required |
+|:-----------------------------|:--------------------------------------------------------------------------------------------------------------------------|:--|
+| endpoint                     | [uri](https://www.elastic.co/guide/en/logstash/current/configuration-file-structure.html#uri)                             | Yes |
+| endpoint_type                | [string](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)                          | No (Deprecated) |
+| protocol                     | [string](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string), one of ["grpc", "http"] | No |
+| compression                  | [string](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string), one of ["gzip", "none"] | No |
+| connect_timeout              | [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)                            | No |
+| timeout                      | [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)   | No |
+| ssl_disable_tls_verification | [boolean](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)                         | No |
+| ssl_certificate_authorities  | [string](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)                          | No |
+| resource                     | [Hash](https://www.elastic.co/guide/en/logstash/latest/configuration-file-structure.html#hash)                            | No |
+| body                         | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
+| name                         | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
+| severity_text                | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
+| trace_id                     | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
+| span_id                      | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
+| trace_flags                  | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
 
 `endpoint`
 
@@ -119,23 +121,33 @@ An endpoint that supports otlp to which logs are sent.
 
 - Deprecated. Replaced with `protocol`.
 
+`connect_timeout`
+
+- Value type is [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)
+- Default is: `10` (seconds)
+
+`timeout`
+
+- Value type is [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)
+- Default is: `10` (seconds)
+
 `protocol`
 
-- Value type is [string](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string)
+- Value type is [string](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)
 - Default is: `grpc`
 
 Possible values are `grpc` or `http`
 
 `compression`
 
-- Value type is [string](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string)
+- Value type is [string](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)
 - Default is: `none`
 
 Possible values are `gzip` or `none`
 
 `ssl_disable_tls_verification`
 
-- Value type is [boolean](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string)
+- Value type is [boolean](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)
 - Default is: `false`
 
 Use this field when you want to disable tls certificate verification.
@@ -143,7 +155,7 @@ The `ssl_certificate_authorities` field is ignored.
 
 `ssl_certificate_authorities`
 
-- Value type is [string](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#string)
+- Value type is [string](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)
 - Default is: `null`
 
 Use this field when you want to add a CA certificate.
@@ -159,32 +171,32 @@ Hash values must be strings.
 
 `body`
 
-- Value type is [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)
+- Value type is [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)
 - Default is `message`
 
 The field to reference as the [Otel Body field](https://opentelemetry.io/docs/reference/specification/logs/data-model/#field-body).
 
 `severity_text`
 
-- Value type is [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)
+- Value type is [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)
 
 The field to reference as the [Otel Severity Text field](https://opentelemetry.io/docs/reference/specification/logs/data-model/#field-severitytext).
 
 `trace_id`
 
-- Value type is [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)
+- Value type is [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)
 
 The field to reference as the [Otel Trace ID field](https://opentelemetry.io/docs/reference/specification/logs/data-model/#field-traceid).
 
 `span_id`
 
-- Value type is [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)
+- Value type is [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)
 
 The field to reference as the [Otel Span ID field](https://opentelemetry.io/docs/reference/specification/logs/data-model/#field-spanid).
 
 `trace_flags`
 
-- Value type is [Field Reference](https://www.elastic.co/guide/en/logstash/7.16/configuration-file-structure.html#field-reference)
+- Value type is [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)
 
 The field to reference as the [Otel Trace Flags field](https://opentelemetry.io/docs/reference/specification/logs/data-model/#field-traceflags).
 
