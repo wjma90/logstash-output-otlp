@@ -157,6 +157,7 @@ public class Otlp implements Output {
         Logger logger = sdkLoggerProvider.get("logstash-output-otlp");
         logger.logRecordBuilder()
                 .setTimestamp(event.getEventTimestamp())
+                .setObservedTimestamp(event.getEventTimestamp())
                 .setSeverityText(severityText)
                 .setBody(body)
                 .setAllAttributes(attributes)
