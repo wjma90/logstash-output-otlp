@@ -1,6 +1,9 @@
 services:
   logstash:
     build: .
+    depends_on:
+      otel:
+        condition: service_started
     volumes:
 #      - "./config/logstash/logstash.conf:/usr/share/logstash/pipeline/logstash.conf"
       - ./config/logstash/pipeline:/usr/share/logstash/pipeline/
@@ -12,3 +15,20 @@ services:
     volumes:
       - "./config/otel/otel.yaml:/etc/otel/config.yaml"
       - "./config/tls:/etc/otel/certs"
+
+  loki:
+    image: grafana/loki:3.6.3
+    command: ["-config.file=/etc/loki/config.yaml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - "./config/loki/loki.yaml:/etc/loki/config.yaml"
+
+  loki-repro:
+    image: python:3.12-alpine
+    depends_on:
+      loki:
+        condition: service_started
+    command: ["python", "/demo/reproduce_loki_dedupe.py"]
+    volumes:
+      - "./config/loki/reproduce_loki_dedupe.py:/demo/reproduce_loki_dedupe.py"
