@@ -195,7 +195,7 @@ public class Otlp implements Output {
         SSLContext sslContext = sslDisableTlsVerification ? getInsecureSSLContext() : null;
 
         Long connectTimeout = configuration.get(CONNECT_TIMEOUT);
-        Long timeout = configuration.get(CONNECT_TIMEOUT);
+        Long timeout = configuration.get(TIMEOUT);
 
         byte[] caFile = caPath == null ? null :getSSLCertificateAuthority(caPath);
 
