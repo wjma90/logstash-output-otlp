@@ -7,7 +7,9 @@ import io.opentelemetry.api.common.AttributesBuilder;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanContext;
+import io.opentelemetry.api.trace.SpanId;
 import io.opentelemetry.api.trace.TraceFlags;
+import io.opentelemetry.api.trace.TraceId;
 import io.opentelemetry.api.trace.TraceState;
 import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporter;
 import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporterBuilder;
@@ -19,10 +21,10 @@ import io.opentelemetry.sdk.logs.export.BatchLogRecordProcessor;
 import io.opentelemetry.sdk.logs.export.LogRecordExporter;
 import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
 import io.opentelemetry.sdk.resources.Resource;
+import org.apache.logging.log4j.LogManager;
 import org.logstash.ConvertedList;
 
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -76,6 +78,7 @@ public class Otlp implements Output {
     private volatile boolean stopped = false;
     private final SdkLoggerProvider sdkLoggerProvider;
     private final AtomicLong emittedLogRecordSequence = new AtomicLong(0);
+    private final org.apache.logging.log4j.Logger pluginLogger;
 
     private final PrintStream testOut;
 
@@ -101,17 +104,41 @@ public class Otlp implements Output {
 
     private io.opentelemetry.context.Context getContextForEvent(Event event) {
         TraceState ts = TraceState.getDefault();
-        TraceFlags tf = TraceFlags.getDefault();
-        String traceFlagsField = extractFieldForEvent(event, configuration.get(TRACE_FLAGS_CONFIG));
-        if(!traceFlagsField.isEmpty()) {
-            tf = TraceFlags.fromByte(Byte.parseByte(traceFlagsField));
-        }
-
         String traceId = extractFieldForEvent(event, configuration.get(TRACE_ID_CONFIG));
         String spanId = extractFieldForEvent(event, configuration.get(SPAN_ID_CONFIG));
 
+        if(traceId.isEmpty() && spanId.isEmpty()) {
+            return io.opentelemetry.context.Context.root();
+        }
+
+        if(!TraceId.isValid(traceId) || !SpanId.isValid(spanId)) {
+            pluginLogger.debug("Malformed trace_id or span_id value; emitting log without trace context.");
+            return io.opentelemetry.context.Context.root();
+        }
+
+        TraceFlags tf = getTraceFlagsForEvent(event);
         SpanContext sp = SpanContext.create(traceId, spanId, tf, ts);
         return io.opentelemetry.context.Context.root().with(Span.wrap(sp));
+    }
+
+    private TraceFlags getTraceFlagsForEvent(Event event) {
+        String traceFlagsField = extractFieldForEvent(event, configuration.get(TRACE_FLAGS_CONFIG));
+        if(traceFlagsField.isEmpty()) {
+            return TraceFlags.getDefault();
+        }
+
+        try {
+            int traceFlags = traceFlagsField.length() == 2
+                    ? Integer.parseUnsignedInt(traceFlagsField, 16)
+                    : Integer.parseInt(traceFlagsField);
+            if(traceFlags < 0 || traceFlags > 255) {
+                throw new NumberFormatException("trace_flags out of byte range");
+            }
+            return TraceFlags.fromByte((byte) traceFlags);
+        } catch (NumberFormatException e) {
+            pluginLogger.debug("Invalid trace_flags value; using default trace flags.");
+            return TraceFlags.getDefault();
+        }
     }
 
     private List<String> decodeConvertedList(ConvertedList convertedList) {
@@ -207,13 +234,20 @@ public class Otlp implements Output {
         URI endpoint = configuration.get(ENDPOINT_CONFIG);
         String compression = configuration.get(COMPRESSION_CONFIG);
         String caPath = configuration.get(SSL_CERTIFICATE_AUTHORITIES);
-        Boolean sslDisableTlsVerification = configuration.get(SSL_DISABLE_TLS_VERIFICATION);
+        boolean sslDisableTlsVerification = Boolean.TRUE.equals(configuration.get(SSL_DISABLE_TLS_VERIFICATION));
         SSLContext sslContext = sslDisableTlsVerification ? getInsecureSSLContext() : null;
 
         Long connectTimeout = configuration.get(CONNECT_TIMEOUT);
         Long timeout = configuration.get(TIMEOUT);
 
         byte[] caFile = caPath == null ? null :getSSLCertificateAuthority(caPath);
+
+        if(sslDisableTlsVerification) {
+            pluginLogger.warn("ssl_disable_tls_verification is enabled. The OTLP exporter will trust any TLS certificate; use only for local testing.");
+            if(caPath != null) {
+                pluginLogger.warn("ssl_certificate_authorities is ignored because ssl_disable_tls_verification is enabled.");
+            }
+        }
 
         if (protocolForConfig(configuration).equals(VALID_PROTOCOL_OPTIONS.http.name())) {
             OtlpHttpLogRecordExporterBuilder builder = OtlpHttpLogRecordExporter.builder();
@@ -264,6 +298,7 @@ public class Otlp implements Output {
         // constructors should validate configuration options
         this.id = id;
         this.configuration = config;
+        this.pluginLogger = context == null ? LogManager.getLogger(Otlp.class) : context.getLogger(this);
         this.testOut = (!testEnabled ? null : new PrintStream(targetStream));
 
         Resource resource = Resource.create(getResourceAttributes());

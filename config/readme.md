@@ -7,13 +7,27 @@ This compose setup contains two independent checks:
 
 ## Prerequisites
 
-Build the local plugin gem before building the Logstash image:
+Build the Logstash core jar and the local plugin gem before building the Logstash image.
+The project expects the Logstash core jar to exist under `assets/logstash-9.0.0/logstash-core/build/libs`.
 
 ```bash
 cd /Users/willianmarchan/Projects/BCP/O11Y/logstash-output-otlp
-JAVA_HOME=/opt/homebrew/Cellar/openjdk@17/17.0.18/libexec/openjdk.jdk/Contents/Home ./gradlew gem -PLOGSTASH_CORE_PATH=/Users/willianmarchan/Projects/BCP/O11Y/logstash-output-otlp/assets/logstash-9.0.0/logstash-core
+make gem
 docker compose build
 ```
+
+The Dockerfile installs the local `*.gem` with `--no-verify --local` only to test a gem built from this repository.
+For a production-like image, install the published gem from RubyGems instead:
+
+```dockerfile
+FROM docker.elastic.co/logstash/logstash:9.0.0
+RUN logstash-plugin install logstash-output-otlp
+```
+
+Gem page: https://rubygems.org/gems/logstash-output-otlp
+
+The certificates in `config/tls` are local test certificates for this compose setup.
+Do not reuse these private keys or certificates outside local testing.
 
 ## Test 1: Loki Exact Dedupe
 

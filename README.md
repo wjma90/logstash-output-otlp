@@ -23,6 +23,8 @@ All other fields are attached as Attributes.
 
 `logstash-plugin install logstash-output-otlp`
 
+The published gem is available at https://rubygems.org/gems/logstash-output-otlp.
+
 ## Usage
 ### Basic
 ```
@@ -67,7 +69,10 @@ output {
 }
 ```
 
-### TLS with Tls Verification Disabled
+### TLS with TLS Verification Disabled
+
+This mode disables server certificate verification and should only be used for local testing.
+
 ```
 input {
     generator {
@@ -102,6 +107,7 @@ output {
 | ssl_disable_tls_verification | [boolean](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)                         | No |
 | ssl_certificate_authorities  | [string](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)                          | No |
 | resource                     | [Hash](https://www.elastic.co/guide/en/logstash/latest/configuration-file-structure.html#hash)                            | No |
+| attributes                   | [Hash](https://www.elastic.co/guide/en/logstash/latest/configuration-file-structure.html#hash)                            | No |
 | body                         | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
 | name                         | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
 | severity_text                | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
@@ -150,7 +156,8 @@ Possible values are `gzip` or `none`
 - Value type is [boolean](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)
 - Default is: `false`
 
-Use this field when you want to disable tls certificate verification.
+Use this field only when you want to disable TLS certificate verification for local testing.
+When enabled, the plugin trusts any server certificate and logs a warning during startup.
 The `ssl_certificate_authorities` field is ignored.
 
 `ssl_certificate_authorities`
@@ -168,6 +175,15 @@ This field is ignored when `ssl_disable_tls_verification => true` is set.
 
 This hash allows additional fields to be added to the [OpenTelemetry Resource field](https://opentelemetry.io/docs/reference/specification/logs/data-model/#field-resource)
 Hash values must be strings.
+
+`attributes`
+
+- Value type is [hash](https://www.elastic.co/guide/en/logstash/latest/configuration-file-structure.html#hash)
+- Default is unset
+
+When `attributes` is not configured, the plugin sends all event fields as OpenTelemetry log attributes except `@timestamp`.
+For production pipelines, prefer an explicit allowlist or filter sensitive fields before this output.
+The OpenTelemetry Collector should also include redaction, transform, or drop processors for secrets and regulated data because it receives the final OTLP attributes.
 
 `body`
 
@@ -204,9 +220,31 @@ The field to reference as the [Otel Trace Flags field](https://opentelemetry.io/
 
 `make gem`
 
+For unit tests, build the Logstash core jar first:
+
+```bash
+make logstashcorejar
+JAVA_HOME=/opt/homebrew/Cellar/openjdk@17/17.0.18/libexec/openjdk.jdk/Contents/Home ./gradlew test -PLOGSTASH_CORE_PATH=/Users/willianmarchan/Projects/BCP/O11Y/logstash-output-otlp/assets/logstash-9.0.0/logstash-core
+```
+
+`make gem` also builds the Logstash core jar before packaging the local plugin gem.
+
 ## Running locally
 
 `docker-compose up`
+
+The local Dockerfile installs a gem built from this repository with `logstash-plugin install --no-verify --local`.
+That pattern is intended for local smoke tests of the local gem only.
+
+For a production-like image that installs the published gem from RubyGems, use:
+
+```dockerfile
+FROM docker.elastic.co/logstash/logstash:9.0.0
+RUN logstash-plugin install logstash-output-otlp
+```
+
+The certificates under `config/tls` are local test certificates used by the Docker Compose example.
+Do not reuse those private keys or certificates in shared, staging, or production environments.
 
 ## Notes
 
