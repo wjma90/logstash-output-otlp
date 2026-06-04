@@ -17,7 +17,10 @@ public class StreamLogRecordExporter implements LogRecordExporter {
         this.endpoint = endpoint.toString();
     }
     public CompletableResultCode export(Collection<LogRecordData> logs) {
-        logs.forEach(lr ->  out.println(endpoint + " " + lr.getBodyValue()));
+        logs.forEach(lr -> out.println(endpoint + " "
+                + lr.getTimestampEpochNanos() + " "
+                + lr.getObservedTimestampEpochNanos() + " "
+                + lr.getBodyValue()));
         out.flush();
         return CompletableResultCode.ofSuccess();
     }

@@ -56,7 +56,10 @@ dependencies {
     implementation 'io.opentelemetry:opentelemetry-sdk-logs:1.53.0'
     implementation 'io.opentelemetry:opentelemetry-exporter-logging:1.53.0'
     implementation 'io.opentelemetry:opentelemetry-exporter-otlp:1.53.0'
-    implementation(fileTree(dir: LOGSTASH_CORE_PATH, include: "/build/libs/logstash-core.jar"))
+    implementation(fileTree(dir: LOGSTASH_CORE_PATH, includes: [
+            "build/libs/logstash-core*.jar",
+            "lib/jars/logstash-core.jar"
+    ]))
 
     testImplementation(platform("org.junit:junit-bom:5.10.2"))
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.13.4'

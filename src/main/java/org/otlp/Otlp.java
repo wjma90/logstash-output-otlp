@@ -31,9 +31,11 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.security.cert.X509Certificate;
+import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 // class name must match plugin name
 @LogstashPlugin(name = "otlp")
@@ -64,6 +66,8 @@ public class Otlp implements Output {
     public static final PluginConfigSpec<String> TRACE_FLAGS_CONFIG = PluginConfigSpec.stringSetting("trace_flags", null, false, false);
     public static final PluginConfigSpec<String> NAME_CONFIG = PluginConfigSpec.stringSetting("name", null, false, false);
     public static final PluginConfigSpec<String> BODY_CONFIG = PluginConfigSpec.stringSetting("body", "message", false, false);
+    private static final long NANOSECONDS_PER_MILLISECOND = 1_000_000L;
+    private static final long NANOSECOND_DISAMBIGUATION_WINDOW = (NANOSECONDS_PER_MILLISECOND / 2) - 1;
 
     private enum VALID_PROTOCOL_OPTIONS {grpc, http}
     private final String id;
@@ -71,6 +75,7 @@ public class Otlp implements Output {
     private final CountDownLatch done = new CountDownLatch(1);
     private volatile boolean stopped = false;
     private final SdkLoggerProvider sdkLoggerProvider;
+    private final AtomicLong emittedLogRecordSequence = new AtomicLong(0);
 
     private final PrintStream testOut;
 
@@ -148,16 +153,27 @@ public class Otlp implements Output {
         return getAttributesForConfigAndEvent(attributeConfig, event);
     }
 
+    Instant timestampWithNanosecondDisambiguation(Instant eventTimestamp) {
+        long offsetNanos = (emittedLogRecordSequence.getAndIncrement() % NANOSECOND_DISAMBIGUATION_WINDOW) + 1;
+        return timestampWithNanosecondDisambiguation(eventTimestamp, offsetNanos);
+    }
+
+    static Instant timestampWithNanosecondDisambiguation(Instant eventTimestamp, long offsetNanos) {
+        return Instant.ofEpochMilli(eventTimestamp.toEpochMilli()).plusNanos(offsetNanos);
+    }
+
     private void emitLog(Event event) {
         io.opentelemetry.context.Context c = getContextForEvent(event);
+        Instant eventTimestamp = event.getEventTimestamp();
+        Instant adjustedTimestamp = timestampWithNanosecondDisambiguation(eventTimestamp);
         String body = extractFieldForEvent(event, configuration.get(BODY_CONFIG));
         String severityText = extractFieldForEvent(event, configuration.get(SEVERITY_TEXT_CONFIG));
         Attributes attributes = getAttributesForEvent(event);
 
         Logger logger = sdkLoggerProvider.get("logstash-output-otlp");
         logger.logRecordBuilder()
-                .setTimestamp(event.getEventTimestamp())
-                .setObservedTimestamp(event.getEventTimestamp())
+                .setTimestamp(adjustedTimestamp)
+                .setObservedTimestamp(eventTimestamp)
                 .setSeverityText(severityText)
                 .setBody(body)
                 .setAllAttributes(attributes)
