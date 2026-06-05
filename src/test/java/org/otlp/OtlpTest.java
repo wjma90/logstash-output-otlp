@@ -2,6 +2,8 @@ package org.otlp;
 
 import co.elastic.logstash.api.Configuration;
 import co.elastic.logstash.api.Event;
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.common.AttributesBuilder;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -66,6 +68,29 @@ public class OtlpTest {
         }
 
         output.stop();
+    }
+
+    @Test
+    public void logstashOtlpWarnsAndSkipsAttributeWhenDefaultAttributeConversionFails() {
+        String endpoint = "http://localhost:4317";
+        Map<String, Object> configValues = new HashMap<>();
+        configValues.put(Otlp.ENDPOINT_CONFIG.name(), endpoint);
+
+        Configuration config = new ConfigurationImpl(configValues);
+
+        try (LogCapture logs = LogCapture.start(Level.DEBUG)) {
+            Otlp output = new Otlp("test-id", config, null, true);
+            AttributesBuilder attributesBuilder = Attributes.builder();
+
+            assertDoesNotThrow(() -> output.putDefaultAttribute(
+                    attributesBuilder,
+                    "bad_attribute",
+                    new FailingStringValue()
+            ));
+            output.stop();
+
+            assertTrue(logs.contains(Level.WARN, "Skipping OTLP attribute because it could not be converted"));
+        }
     }
 
     @Test
@@ -331,6 +356,13 @@ public class OtlpTest {
 
     private long roundEpochNanosToMillis(long epochNanos) {
         return (epochNanos + 500_000L) / 1_000_000L;
+    }
+
+    private static final class FailingStringValue {
+        @Override
+        public String toString() {
+            throw new IllegalStateException("cannot stringify");
+        }
     }
 
     private static final class LogCapture implements AutoCloseable {

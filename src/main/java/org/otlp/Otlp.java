@@ -156,13 +156,21 @@ public class Otlp implements Output {
             if (key.equals("@timestamp")) continue;
 
             Object value = e.getValue();
-            if (value instanceof ConvertedList) {
-                a.put(AttributeKey.stringArrayKey(key), decodeConvertedList((ConvertedList) value));
-            } else {
-                a.put(AttributeKey.stringKey(key), String.valueOf(value));
-            }
+            putDefaultAttribute(a, key, value);
         }
         return a.build();
+    }
+
+    void putDefaultAttribute(AttributesBuilder attributesBuilder, String key, Object value) {
+        try {
+            if (value instanceof ConvertedList) {
+                attributesBuilder.put(AttributeKey.stringArrayKey(key), decodeConvertedList((ConvertedList) value));
+            } else {
+                attributesBuilder.put(AttributeKey.stringKey(key), String.valueOf(value));
+            }
+        } catch (RuntimeException e) {
+            pluginLogger.warn("Skipping OTLP attribute because it could not be converted: {}", key, e);
+        }
     }
 
     private Attributes getAttributesForConfigAndEvent(Map<String, Object> config, Event event) {
