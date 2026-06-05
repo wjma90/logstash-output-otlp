@@ -142,8 +142,9 @@ public class Otlp implements Output {
     }
 
     private List<String> decodeConvertedList(ConvertedList convertedList) {
-        String[] output = convertedList.unconvert().stream().toArray(String[]::new);
-        return Arrays.asList(output);
+        return convertedList.unconvert().stream()
+                .map(String::valueOf)
+                .toList();
     }
 
     private Attributes getDefaultAttributes(Event event) {
@@ -158,7 +159,7 @@ public class Otlp implements Output {
             if (value instanceof ConvertedList) {
                 a.put(AttributeKey.stringArrayKey(key), decodeConvertedList((ConvertedList) value));
             } else {
-                a.put(AttributeKey.stringKey(key), (String) value.toString());
+                a.put(AttributeKey.stringKey(key), String.valueOf(value));
             }
         }
         return a.build();

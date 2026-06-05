@@ -4,6 +4,7 @@ import co.elastic.logstash.api.Configuration;
 import co.elastic.logstash.api.Event;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.logging.log4j.Level;
@@ -65,6 +66,51 @@ public class OtlpTest {
         }
 
         output.stop();
+    }
+
+    @Test
+    public void logstashOtlpKeepsStringListAttributesWithoutFailingPipeline() {
+        String endpoint = "http://localhost:4317";
+        Map<String, Object> configValues = new HashMap<>();
+        configValues.put(Otlp.ENDPOINT_CONFIG.name(), endpoint);
+
+        Configuration config = new ConfigurationImpl(configValues);
+        ByteArrayOutputStream bas = new ByteArrayOutputStream();
+        Otlp output = new Otlp("test-id", config, null, bas, true);
+
+        Event event = new org.logstash.Event();
+        event.setField("message", "string list attributes");
+        event.setField("string_list", List.of("one", "two", "three"));
+
+        assertDoesNotThrow(() -> output.output(List.of(event)));
+        output.stop();
+
+        assertTrue(bas.toString().contains("string list attributes"));
+    }
+
+    @Test
+    public void logstashOtlpStringifiesMixedListAttributesWithoutFailingPipeline() {
+        String endpoint = "http://localhost:4317";
+        Map<String, Object> configValues = new HashMap<>();
+        configValues.put(Otlp.ENDPOINT_CONFIG.name(), endpoint);
+
+        Configuration config = new ConfigurationImpl(configValues);
+        ByteArrayOutputStream bas = new ByteArrayOutputStream();
+        Otlp output = new Otlp("test-id", config, null, bas, true);
+
+        Event event = new org.logstash.Event();
+        event.setField("message", "mixed list attributes");
+        event.setField("mixed_list", List.of(
+                "plain",
+                Map.of("nested", "value"),
+                List.of("inner"),
+                7
+        ));
+
+        assertDoesNotThrow(() -> output.output(List.of(event)));
+        output.stop();
+
+        assertTrue(bas.toString().contains("mixed list attributes"));
     }
 
     @Test
