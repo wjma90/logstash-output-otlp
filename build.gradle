@@ -52,10 +52,11 @@ shadowJar {
 }
 
 dependencies {
-    implementation 'org.apache.logging.log4j:log4j-api:2.25.1'
-    implementation 'io.opentelemetry:opentelemetry-sdk-logs:1.53.0'
-    implementation 'io.opentelemetry:opentelemetry-exporter-logging:1.53.0'
-    implementation 'io.opentelemetry:opentelemetry-exporter-otlp:1.53.0'
+    implementation 'org.apache.logging.log4j:log4j-api:2.25.5'
+    implementation platform('io.opentelemetry:opentelemetry-bom:1.62.0')
+    implementation 'io.opentelemetry:opentelemetry-sdk-logs'
+    implementation 'io.opentelemetry:opentelemetry-exporter-logging'
+    implementation 'io.opentelemetry:opentelemetry-exporter-otlp'
     implementation(fileTree(dir: LOGSTASH_CORE_PATH, includes: [
             "build/libs/logstash-core*.jar"
     ]))
@@ -65,7 +66,7 @@ dependencies {
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.13.4'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     testImplementation 'org.jruby:jruby-complete:9.4.14.0'
-    testImplementation 'org.apache.logging.log4j:log4j-core:2.25.1'
+    testImplementation 'org.apache.logging.log4j:log4j-core:2.25.5'
 }
 
 tasks.test {
