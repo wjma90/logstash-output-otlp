@@ -15,8 +15,10 @@ import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporter;
 import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporterBuilder;
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporter;
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporterBuilder;
+import io.opentelemetry.sdk.common.CompletableResultCode;
 import io.opentelemetry.sdk.logs.LogRecordProcessor;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
+import io.opentelemetry.sdk.logs.data.LogRecordData;
 import io.opentelemetry.sdk.logs.export.BatchLogRecordProcessor;
 import io.opentelemetry.sdk.logs.export.LogRecordExporter;
 import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
@@ -59,6 +61,14 @@ public class Otlp implements Output {
             PluginConfigSpec.numSetting("connect_timeout", 10);
     public static final PluginConfigSpec<Long> TIMEOUT =
             PluginConfigSpec.numSetting("timeout", 10);
+    public static final PluginConfigSpec<Long> MAX_QUEUE_SIZE_CONFIG =
+            PluginConfigSpec.numSetting("max_queue_size", 2048);
+    public static final PluginConfigSpec<Long> MAX_BATCH_SIZE_CONFIG =
+            PluginConfigSpec.numSetting("max_batch_size", 512);
+    public static final PluginConfigSpec<Long> SCHEDULE_DELAY_CONFIG =
+            PluginConfigSpec.numSetting("schedule_delay_millis", 1000);
+    public static final PluginConfigSpec<Long> EXPORT_TIMEOUT_CONFIG =
+            PluginConfigSpec.numSetting("export_timeout_millis", 30000);
 
     public static final PluginConfigSpec<Map<String, Object>>  ATTRIBUTES_CONFIG = PluginConfigSpec.hashSetting("attributes",null, false, false);
     public static final PluginConfigSpec<Map<String, Object>> RESOURCE_CONFIG = PluginConfigSpec.hashSetting("resource", null, false, false);
@@ -79,6 +89,7 @@ public class Otlp implements Output {
     private final SdkLoggerProvider sdkLoggerProvider;
     private final AtomicLong emittedLogRecordSequence = new AtomicLong(0);
     private final org.apache.logging.log4j.Logger pluginLogger;
+    private final DiagnosticLogRecordExporter diagnosticExporter;
 
     private final PrintStream testOut;
 
@@ -310,10 +321,26 @@ public class Otlp implements Output {
         this.pluginLogger = context == null ? LogManager.getLogger(Otlp.class) : context.getLogger(this);
         this.testOut = (!testEnabled ? null : new PrintStream(targetStream));
 
+        installJulBridge(this.pluginLogger);
+
         Resource resource = Resource.create(getResourceAttributes());
 
-        LogRecordExporter exporter = (testEnabled) ? new StreamLogRecordExporter(testOut, config.get(ENDPOINT_CONFIG)) : logExporterForConfig(config);
-        LogRecordProcessor processor = (testEnabled) ? SimpleLogRecordProcessor.create(exporter) : BatchLogRecordProcessor.builder(exporter).build();
+        LogRecordExporter baseExporter = (testEnabled) ? new StreamLogRecordExporter(testOut, config.get(ENDPOINT_CONFIG)) : logExporterForConfig(config);
+        this.diagnosticExporter = new DiagnosticLogRecordExporter(baseExporter, this.pluginLogger, config.get(ENDPOINT_CONFIG));
+
+        Long maxQueueSize = config.get(MAX_QUEUE_SIZE_CONFIG);
+        Long maxBatchSize = config.get(MAX_BATCH_SIZE_CONFIG);
+        Long scheduleDelay = config.get(SCHEDULE_DELAY_CONFIG);
+        Long exportTimeout = config.get(EXPORT_TIMEOUT_CONFIG);
+
+        LogRecordProcessor processor = (testEnabled)
+                ? SimpleLogRecordProcessor.create(this.diagnosticExporter)
+                : BatchLogRecordProcessor.builder(this.diagnosticExporter)
+                        .setMaxQueueSize(maxQueueSize.intValue())
+                        .setMaxExportBatchSize(maxBatchSize.intValue())
+                        .setScheduleDelay(scheduleDelay, TimeUnit.MILLISECONDS)
+                        .setExporterTimeout(exportTimeout, TimeUnit.MILLISECONDS)
+                        .build();
 
         sdkLoggerProvider = SdkLoggerProvider.builder()
                 .setResource(resource)
@@ -372,6 +399,104 @@ public class Otlp implements Output {
         done.await();
     }
 
+    public DiagnosticLogRecordExporter getDiagnosticExporter() {
+        return diagnosticExporter;
+    }
+
+    private static void installJulBridge(org.apache.logging.log4j.Logger pluginLogger) {
+        try {
+            java.util.logging.Handler handler = new java.util.logging.Handler() {
+                @Override
+                public void publish(java.util.logging.LogRecord record) {
+                    if (record == null) return;
+                    if (record.getLevel().intValue() >= java.util.logging.Level.WARNING.intValue()) {
+                        Throwable thrown = record.getThrown();
+                        String msg = String.format("[OTEL-COLLECTOR-COMM] %s", record.getMessage());
+                        if (record.getLevel().intValue() >= java.util.logging.Level.SEVERE.intValue()) {
+                            if (thrown != null) {
+                                pluginLogger.error(msg, thrown);
+                            } else {
+                                pluginLogger.error(msg);
+                            }
+                        } else {
+                            if (thrown != null) {
+                                pluginLogger.warn(msg, thrown);
+                            } else {
+                                pluginLogger.warn(msg);
+                            }
+                        }
+                    }
+                }
+
+                @Override
+                public void flush() {}
+
+                @Override
+                public void close() {}
+            };
+            java.util.logging.Logger.getLogger("io.opentelemetry").addHandler(handler);
+            java.util.logging.Logger.getLogger("io.grpc").addHandler(handler);
+        } catch (Exception ignored) {
+        }
+    }
+
+    public static class DiagnosticLogRecordExporter implements LogRecordExporter {
+        private final LogRecordExporter delegate;
+        private final org.apache.logging.log4j.Logger pluginLogger;
+        private final URI endpoint;
+        private final AtomicLong failedBatchesCount = new AtomicLong(0);
+        private final AtomicLong failedRecordsCount = new AtomicLong(0);
+        private final AtomicLong exportedRecordsCount = new AtomicLong(0);
+
+        public DiagnosticLogRecordExporter(LogRecordExporter delegate, org.apache.logging.log4j.Logger pluginLogger, URI endpoint) {
+            this.delegate = delegate;
+            this.pluginLogger = pluginLogger;
+            this.endpoint = endpoint;
+        }
+
+        @Override
+        public CompletableResultCode export(Collection<LogRecordData> logs) {
+            CompletableResultCode result = delegate.export(logs);
+            result.whenComplete(() -> {
+                if (!result.isSuccess()) {
+                    failedBatchesCount.incrementAndGet();
+                    failedRecordsCount.addAndGet(logs.size());
+                    pluginLogger.error("[OTLP Plugin] Fallo al exportar lote de {} logs al endpoint ({}). " +
+                            "El endpoint rechazó el lote o se superó el timeout de conexión.", logs.size(), endpoint);
+                } else {
+                    exportedRecordsCount.addAndGet(logs.size());
+                }
+            });
+            return result;
+        }
+
+        @Override
+        public CompletableResultCode flush() {
+            return delegate.flush();
+        }
+
+        @Override
+        public CompletableResultCode shutdown() {
+            return delegate.shutdown();
+        }
+
+        public long getFailedBatchesCount() {
+            return failedBatchesCount.get();
+        }
+
+        public long getFailedRecordsCount() {
+            return failedRecordsCount.get();
+        }
+
+        public long getExportedRecordsCount() {
+            return exportedRecordsCount.get();
+        }
+
+        public LogRecordExporter getDelegate() {
+            return delegate;
+        }
+    }
+
     @Override
     public Collection<PluginConfigSpec<?>> configSchema() {
         return PluginHelper.commonOutputSettings(Arrays.asList(
@@ -390,7 +515,11 @@ public class Otlp implements Output {
                 SSL_CERTIFICATE_AUTHORITIES,
                 SSL_DISABLE_TLS_VERIFICATION,
                 CONNECT_TIMEOUT,
-                TIMEOUT
+                TIMEOUT,
+                MAX_QUEUE_SIZE_CONFIG,
+                MAX_BATCH_SIZE_CONFIG,
+                SCHEDULE_DELAY_CONFIG,
+                EXPORT_TIMEOUT_CONFIG
         ));
     }
 
