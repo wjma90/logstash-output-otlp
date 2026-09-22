@@ -114,6 +114,10 @@ output {
 | trace_id                     | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
 | span_id                      | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
 | trace_flags                  | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
+| max_queue_size               | [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)                            | No (Default 2048) |
+| max_batch_size               | [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)                            | No (Default 512) |
+| schedule_delay_millis        | [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)                            | No (Default 1000) |
+| export_timeout_millis        | [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)                            | No (Default 30000) |
 
 `endpoint`
 

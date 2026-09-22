@@ -4,6 +4,9 @@ import co.elastic.logstash.api.Configuration;
 import co.elastic.logstash.api.Event;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.common.AttributesBuilder;
+import io.opentelemetry.sdk.common.CompletableResultCode;
+import io.opentelemetry.sdk.logs.data.LogRecordData;
+import io.opentelemetry.sdk.logs.export.LogRecordExporter;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -18,9 +21,11 @@ import org.junit.jupiter.api.Test;
 import org.logstash.plugins.ConfigurationImpl;
 
 import java.io.ByteArrayOutputStream;
+import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.HashMap;
 import java.util.List;
@@ -344,6 +349,92 @@ public class OtlpTest {
                 );
             }
         }
+    }
+
+    @Test
+    public void logstashOtlpAcceptsQueueAndBatchConfigSchema() {
+        String endpoint = "http://localhost:4317";
+        Map<String, Object> configValues = new HashMap<>();
+        configValues.put(Otlp.ENDPOINT_CONFIG.name(), endpoint);
+        configValues.put(Otlp.MAX_QUEUE_SIZE_CONFIG.name(), 10000L);
+        configValues.put(Otlp.MAX_BATCH_SIZE_CONFIG.name(), 1024L);
+        configValues.put(Otlp.SCHEDULE_DELAY_CONFIG.name(), 500L);
+        configValues.put(Otlp.EXPORT_TIMEOUT_CONFIG.name(), 15000L);
+
+        Configuration config = new ConfigurationImpl(configValues);
+        ByteArrayOutputStream bas = new ByteArrayOutputStream();
+        Otlp output = new Otlp("test-id", config, null, bas, true);
+
+        assertTrue(output.configSchema().contains(Otlp.MAX_QUEUE_SIZE_CONFIG));
+        assertTrue(output.configSchema().contains(Otlp.MAX_BATCH_SIZE_CONFIG));
+        assertTrue(output.configSchema().contains(Otlp.SCHEDULE_DELAY_CONFIG));
+        assertTrue(output.configSchema().contains(Otlp.EXPORT_TIMEOUT_CONFIG));
+        assertEquals(0, output.getDiagnosticExporter().getFailedBatchesCount());
+        output.stop();
+    }
+
+    @Test
+    public void diagnosticExporterLogsErrorWhenExportFails() {
+        URI endpoint = URI.create("http://127.0.0.1:4317");
+        org.apache.logging.log4j.Logger logger = LogManager.getLogger(Otlp.class);
+
+        LogRecordExporter failingDelegate = new LogRecordExporter() {
+            @Override
+            public CompletableResultCode export(Collection<LogRecordData> logs) {
+                return CompletableResultCode.ofFailure();
+            }
+
+            @Override
+            public CompletableResultCode flush() {
+                return CompletableResultCode.ofSuccess();
+            }
+
+            @Override
+            public CompletableResultCode shutdown() {
+                return CompletableResultCode.ofSuccess();
+            }
+        };
+
+        Otlp.DiagnosticLogRecordExporter diagnosticExporter =
+                new Otlp.DiagnosticLogRecordExporter(failingDelegate, logger, endpoint);
+
+        try (LogCapture capture = LogCapture.start(Level.ERROR)) {
+            CompletableResultCode code = diagnosticExporter.export(Collections.emptyList());
+            assertFalse(code.isSuccess());
+            assertEquals(1, diagnosticExporter.getFailedBatchesCount());
+            assertTrue(capture.contains(Level.ERROR, "[OTLP Plugin] Fallo al exportar lote de 0 logs al endpoint (http://127.0.0.1:4317)"));
+        }
+    }
+
+    @Test
+    public void diagnosticExporterTracksSuccess() {
+        URI endpoint = URI.create("http://127.0.0.1:4317");
+        org.apache.logging.log4j.Logger logger = LogManager.getLogger(Otlp.class);
+
+        LogRecordExporter successDelegate = new LogRecordExporter() {
+            @Override
+            public CompletableResultCode export(Collection<LogRecordData> logs) {
+                return CompletableResultCode.ofSuccess();
+            }
+
+            @Override
+            public CompletableResultCode flush() {
+                return CompletableResultCode.ofSuccess();
+            }
+
+            @Override
+            public CompletableResultCode shutdown() {
+                return CompletableResultCode.ofSuccess();
+            }
+        };
+
+        Otlp.DiagnosticLogRecordExporter diagnosticExporter =
+                new Otlp.DiagnosticLogRecordExporter(successDelegate, logger, endpoint);
+
+        CompletableResultCode code = diagnosticExporter.export(Collections.emptyList());
+        assertTrue(code.isSuccess());
+        assertEquals(0, diagnosticExporter.getFailedBatchesCount());
+        assertEquals(0, diagnosticExporter.getExportedRecordsCount());
     }
 
     private long toEpochNanos(Instant instant) {
