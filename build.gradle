@@ -52,14 +52,15 @@ shadowJar {
 }
 
 dependencies {
-    implementation 'org.apache.logging.log4j:log4j-api:2.25.5'
+    compileOnly 'org.apache.logging.log4j:log4j-api:2.25.5'
     implementation platform('io.opentelemetry:opentelemetry-bom:1.62.0')
     implementation 'io.opentelemetry:opentelemetry-sdk-logs'
     implementation 'io.opentelemetry:opentelemetry-exporter-logging'
     implementation 'io.opentelemetry:opentelemetry-exporter-otlp'
-    implementation(fileTree(dir: LOGSTASH_CORE_PATH, includes: [
-            "build/libs/logstash-core*.jar"
-    ]))
+    compileOnly(fileTree(dir: LOGSTASH_CORE_PATH, includes: ["build/libs/logstash-core*.jar"],
+            excludes: ["**/*sources.jar", "**/*javadoc.jar"]))
+    testImplementation(fileTree(dir: LOGSTASH_CORE_PATH, includes: ["build/libs/logstash-core*.jar"],
+            excludes: ["**/*sources.jar", "**/*javadoc.jar"]))
 
     testImplementation(platform("org.junit:junit-bom:5.10.2"))
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.13.4'
@@ -73,18 +74,53 @@ tasks.test {
     useJUnitPlatform()
 }
 
-clean {
+tasks.named('clean', Delete) {
     delete "${projectDir}/Gemfile"
     delete "${projectDir}/" + pluginInfo.pluginFullName() + ".gemspec"
     delete "${projectDir}/lib/"
     delete "${projectDir}/vendor/"
-    new FileNameFinder().getFileNames(projectDir.toString(), pluginInfo.pluginFullName() + "-*.*.*.gem").each { filename ->
-        delete filename
+    delete fileTree(projectDir) {
+        include pluginInfo.pluginFullName() + "-*.*.*.gem"
     }
 }
 
 tasks.withType(JavaCompile) {
     options.encoding = 'UTF-8'
+}
+
+def validateHostedPluginJar = { File pluginJar ->
+    String packageName = project.group.toString()
+    if (packageName == 'org.logstash' || packageName.startsWith('org.logstash.') ||
+            packageName == 'co.elastic.logstash' || packageName.startsWith('co.elastic.logstash.')) {
+        throw new GradleException('The plugin must not use a reserved Logstash package')
+    }
+    new java.util.jar.JarFile(pluginJar).withCloseable { jar ->
+        def bundledHostClasses = jar.entries().findAll { entry ->
+            entry.name.endsWith('.class') &&
+                    ['org/logstash/', 'co/elastic/logstash/', 'org/apache/logging/log4j/'].any {
+                        entry.name.startsWith(it)
+                    }
+        }
+        if (!bundledHostClasses.isEmpty()) {
+            throw new GradleException('The plugin jar must not contain Logstash or Log4j host classes')
+        }
+    }
+    URL[] validationClasspath = ([pluginJar] + configurations.compileClasspath.files).collect {
+        it.toURI().toURL()
+    } as URL[]
+    new URLClassLoader(validationClasspath, ClassLoader.getPlatformClassLoader()).withCloseable { loader ->
+        Class<?> pluginClass = loader.loadClass(packageName + '.' + pluginInfo.pluginClass)
+        def annotations = pluginClass.annotations.findAll {
+            it.annotationType().name == 'co.elastic.logstash.api.LogstashPlugin'
+        }
+        if (annotations.size() != 1 || annotations[0].name() != pluginInfo.pluginName ||
+                annotations[0].name().replace('_', '').toLowerCase() != pluginInfo.pluginClass.toLowerCase()) {
+            throw new GradleException('The @LogstashPlugin name must match pluginName and pluginClass')
+        }
+        if (!loader.loadClass('co.elastic.logstash.api.Output').isAssignableFrom(pluginClass)) {
+            throw new GradleException('The plugin must implement the Logstash Output API')
+        }
+    }
 }
 
 tasks.register("vendor"){
@@ -95,7 +131,7 @@ tasks.register("vendor"){
         File projectJarFile = file("${vendorPathPrefix}/${projectGroupPath}/${pluginInfo.pluginFullName()}/${project.version}/${pluginInfo.pluginFullName()}-${project.version}.jar")
         projectJarFile.mkdirs()
         Files.copy(file("$buildDir/libs/${project.name}-${project.version}.jar").toPath(), projectJarFile.toPath(), REPLACE_EXISTING)
-        validatePluginJar projectJarFile, project.group
+        validateHostedPluginJar(projectJarFile)
     }
 }
 

@@ -1,0 +1,21 @@
+name: otlp-export-demo
+
+services:
+  logstash:
+    build:
+      context: ../..
+      dockerfile: tests/integration/Dockerfile
+    environment:
+      LS_JAVA_OPTS: -Xms256m -Xmx512m
+      XPACK_MONITORING_ENABLED: "false"
+    volumes:
+      - ./logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+    command: ["--pipeline.workers", "1", "--log.level", "info"]
+    depends_on:
+      - collector
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.131.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./collector.yaml:/etc/otelcol/config.yaml:ro
