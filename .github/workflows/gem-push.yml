@@ -1,5 +1,8 @@
 name: Publish Gems
 
+permissions:
+  contents: read
+
 on:
   push:
     tags:

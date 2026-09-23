@@ -7,6 +7,9 @@
 
 name: Build Gem
 
+permissions:
+  contents: read
+
 on:
   workflow_call:
   push:
