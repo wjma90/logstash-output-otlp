@@ -15,6 +15,7 @@ import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporter;
 import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporterBuilder;
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporter;
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporterBuilder;
+import io.opentelemetry.sdk.common.CompletableResultCode;
 import io.opentelemetry.sdk.logs.LogRecordProcessor;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.export.BatchLogRecordProcessor;
@@ -37,6 +38,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 // class name must match plugin name
@@ -59,6 +61,14 @@ public class Otlp implements Output {
             PluginConfigSpec.numSetting("connect_timeout", 10);
     public static final PluginConfigSpec<Long> TIMEOUT =
             PluginConfigSpec.numSetting("timeout", 10);
+    public static final PluginConfigSpec<Long> MAX_QUEUE_SIZE_CONFIG =
+            PluginConfigSpec.numSetting("max_queue_size", 2048);
+    public static final PluginConfigSpec<Long> MAX_BATCH_SIZE_CONFIG =
+            PluginConfigSpec.numSetting("max_batch_size", 512);
+    public static final PluginConfigSpec<Long> SCHEDULE_DELAY_CONFIG =
+            PluginConfigSpec.numSetting("schedule_delay_millis", 1000);
+    public static final PluginConfigSpec<Long> EXPORT_TIMEOUT_CONFIG =
+            PluginConfigSpec.numSetting("export_timeout_millis", 30000);
 
     public static final PluginConfigSpec<Map<String, Object>>  ATTRIBUTES_CONFIG = PluginConfigSpec.hashSetting("attributes",null, false, false);
     public static final PluginConfigSpec<Map<String, Object>> RESOURCE_CONFIG = PluginConfigSpec.hashSetting("resource", null, false, false);
@@ -75,12 +85,11 @@ public class Otlp implements Output {
     private final String id;
     private final Configuration configuration;
     private final CountDownLatch done = new CountDownLatch(1);
+    private final AtomicBoolean shutdownStarted = new AtomicBoolean();
     private volatile boolean stopped = false;
     private final SdkLoggerProvider sdkLoggerProvider;
     private final AtomicLong emittedLogRecordSequence = new AtomicLong(0);
     private final org.apache.logging.log4j.Logger pluginLogger;
-
-    private final PrintStream testOut;
 
     // all plugins must provide a constructor that accepts id, Configuration, and Context
     public Otlp(final String id, final Configuration configuration, final Context context) {
@@ -304,21 +313,68 @@ public class Otlp implements Output {
     }
 
     Otlp(final String id, final Configuration config, final Context context, OutputStream targetStream, final Boolean testEnabled) {
+        this(id, config, context, targetStream, testEnabled, null);
+    }
+
+    Otlp(final String id, final Configuration config, final Context context,
+         LogRecordExporter delegate, boolean batchEnabled) {
+        this(id, config, context, null, !batchEnabled, Objects.requireNonNull(delegate));
+    }
+
+    private Otlp(final String id, final Configuration config, final Context context,
+                 OutputStream targetStream, boolean testEnabled, LogRecordExporter suppliedExporter) {
         // constructors should validate configuration options
         this.id = id;
         this.configuration = config;
         this.pluginLogger = context == null ? LogManager.getLogger(Otlp.class) : context.getLogger(this);
-        this.testOut = (!testEnabled ? null : new PrintStream(targetStream));
+
+        int maxQueueSize = (int) positiveSetting(MAX_QUEUE_SIZE_CONFIG, Integer.MAX_VALUE);
+        int maxBatchSize = (int) positiveSetting(MAX_BATCH_SIZE_CONFIG, Integer.MAX_VALUE);
+        long scheduleDelay = positiveSetting(SCHEDULE_DELAY_CONFIG, Long.MAX_VALUE / 1_000_000);
+        long exportTimeout = positiveSetting(EXPORT_TIMEOUT_CONFIG, Long.MAX_VALUE / 1_000_000);
+        long requestTimeout = positiveSetting(TIMEOUT, Long.MAX_VALUE / 1_000_000_000);
+        if (maxBatchSize > maxQueueSize) {
+            throw new IllegalArgumentException("max_batch_size must not exceed max_queue_size");
+        }
+        if (exportTimeout < TimeUnit.SECONDS.toMillis(requestTimeout)) {
+            throw new IllegalArgumentException("export_timeout_millis must be at least timeout * 1000");
+        }
 
         Resource resource = Resource.create(getResourceAttributes());
 
-        LogRecordExporter exporter = (testEnabled) ? new StreamLogRecordExporter(testOut, config.get(ENDPOINT_CONFIG)) : logExporterForConfig(config);
-        LogRecordProcessor processor = (testEnabled) ? SimpleLogRecordProcessor.create(exporter) : BatchLogRecordProcessor.builder(exporter).build();
+        LogRecordExporter delegate = suppliedExporter != null ? suppliedExporter
+                : testEnabled ? new StreamLogRecordExporter(new PrintStream(targetStream), config.get(ENDPOINT_CONFIG))
+                : logExporterForConfig(config);
+        LogRecordExporter exporter = new DiagnosticLogRecordExporter(delegate, pluginLogger, id, config.get(ENDPOINT_CONFIG));
+        LogRecordProcessor processor = null;
+        try {
+            processor = testEnabled ? SimpleLogRecordProcessor.create(exporter)
+                    : BatchLogRecordProcessor.builder(exporter)
+                            .setMaxQueueSize(maxQueueSize)
+                            .setMaxExportBatchSize(maxBatchSize)
+                            .setScheduleDelay(scheduleDelay, TimeUnit.MILLISECONDS)
+                            .setExporterTimeout(exportTimeout, TimeUnit.MILLISECONDS)
+                            .build();
+            sdkLoggerProvider = SdkLoggerProvider.builder()
+                    .setResource(resource)
+                    .addLogRecordProcessor(processor)
+                    .build();
+        } catch (RuntimeException | Error failure) {
+            if (processor != null) {
+                processor.shutdown();
+            } else {
+                exporter.shutdown();
+            }
+            throw failure;
+        }
+    }
 
-        sdkLoggerProvider = SdkLoggerProvider.builder()
-                .setResource(resource)
-                .addLogRecordProcessor(processor)
-                .build();
+    private long positiveSetting(PluginConfigSpec<Long> setting, long maximum) {
+        long value = configuration.get(setting);
+        if (value <= 0 || value > maximum) {
+            throw new IllegalArgumentException(setting.name() + " must be between 1 and " + maximum);
+        }
+        return value;
     }
 
     private SSLContext getInsecureSSLContext() {
@@ -362,9 +418,40 @@ public class Otlp implements Output {
     @Override
     public void stop() {
         stopped = true;
-        sdkLoggerProvider.forceFlush();
-        sdkLoggerProvider.shutdown();
-        done.countDown();
+        if (shutdownStarted.compareAndSet(false, true)) {
+            initiateShutdown();
+        }
+        boolean interrupted = false;
+        while (true) {
+            try {
+                done.await();
+                break;
+            } catch (InterruptedException interruption) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+    }
+
+    private void initiateShutdown() {
+        try {
+            CompletableResultCode result = sdkLoggerProvider.shutdown();
+            result.whenComplete(() -> {
+                try {
+                    if (!result.isSuccess()) {
+                        pluginLogger.error("OTLP shutdown failed: output_id={}", id, result.getFailureThrowable());
+                    }
+                } finally {
+                    done.countDown();
+                }
+            });
+        } catch (RuntimeException failure) {
+            try {
+                pluginLogger.error("OTLP shutdown failed: output_id={}", id, failure);
+            } finally {
+                done.countDown();
+            }
+        }
     }
 
     @Override
@@ -390,7 +477,11 @@ public class Otlp implements Output {
                 SSL_CERTIFICATE_AUTHORITIES,
                 SSL_DISABLE_TLS_VERIFICATION,
                 CONNECT_TIMEOUT,
-                TIMEOUT
+                TIMEOUT,
+                MAX_QUEUE_SIZE_CONFIG,
+                MAX_BATCH_SIZE_CONFIG,
+                SCHEDULE_DELAY_CONFIG,
+                EXPORT_TIMEOUT_CONFIG
         ));
     }
 

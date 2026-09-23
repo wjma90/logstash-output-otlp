@@ -7,6 +7,9 @@
 
 name: Build Gem
 
+permissions:
+  contents: read
+
 on:
   workflow_call:
   push:
@@ -35,6 +38,16 @@ jobs:
       if: ${{ github.ref_type != 'tag' }}
       run: make gem
       shell: bash
+    - name: Run unit tests
+      run: ./gradlew test
+    - name: Archive test reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-reports
+        path: |
+          build/reports/tests/
+          build/test-results/
     - name: Archive gem artifacts
       uses: actions/upload-artifact@v4
       with:

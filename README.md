@@ -104,6 +104,10 @@ output {
 | compression                  | [string](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string), one of ["gzip", "none"] | No |
 | connect_timeout              | [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)                            | No |
 | timeout                      | [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)   | No |
+| max_queue_size               | long | No |
+| max_batch_size               | long | No |
+| schedule_delay_millis        | long | No |
+| export_timeout_millis        | long | No |
 | ssl_disable_tls_verification | [boolean](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)                         | No |
 | ssl_certificate_authorities  | [string](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)                          | No |
 | resource                     | [Hash](https://www.elastic.co/guide/en/logstash/latest/configuration-file-structure.html#hash)                            | No |
@@ -136,6 +140,30 @@ An endpoint that supports otlp to which logs are sent.
 
 - Value type is [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)
 - Default is: `10` (seconds)
+- Must be positive and no greater than `export_timeout_millis / 1000`.
+
+Batch settings:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `max_queue_size` | `2048` | Maximum records waiting in memory. |
+| `max_batch_size` | `512` | Maximum records in one export. |
+| `schedule_delay_millis` | `1000` | Interval for exporting an incomplete batch; a full batch can send earlier. |
+| `export_timeout_millis` | `30000` | Maximum wait for an export result in the batch processor. |
+
+All four values must be positive integers, and `max_batch_size` must not exceed
+`max_queue_size`. Invalid or overflowing values fail at startup.
+
+The OTLP SDK retries transient failures with exponential backoff and jitter,
+up to five attempts including the original request. The initial delay is about
+one second, multiplied by 1.5, with a nominal five-second backoff cap. The request
+`timeout` can end retries earlier; five attempts are not guaranteed. See the
+[SDK retry policy](https://github.com/open-telemetry/opentelemetry-java/blob/v1.62.0/sdk/common/src/main/java/io/opentelemetry/sdk/common/export/RetryPolicy.java).
+
+Keep `export_timeout_millis` above the request timeout with some margin; the
+processor's wait does not cancel the network request. The queue is bounded and
+in memory: excess events are dropped when it fills, and batches that exhaust
+their retries are not requeued. This does not guarantee delivery during an outage.
 
 `protocol`
 
@@ -224,7 +252,7 @@ For unit tests, build the Logstash core jar first:
 
 ```bash
 make logstashcorejar
-JAVA_HOME=/opt/homebrew/Cellar/openjdk@17/17.0.18/libexec/openjdk.jdk/Contents/Home ./gradlew test -PLOGSTASH_CORE_PATH=/Users/willianmarchan/Projects/BCP/O11Y/logstash-output-otlp/assets/logstash-9.0.0/logstash-core
+./gradlew test -PLOGSTASH_CORE_PATH="$PWD/assets/logstash-9.0.0/logstash-core"
 ```
 
 `make gem` also builds the Logstash core jar before packaging the local plugin gem.
@@ -245,6 +273,33 @@ RUN logstash-plugin install logstash-output-otlp
 
 The certificates under `config/tls` are local test certificates used by the Docker Compose example.
 Do not reuse those private keys or certificates in shared, staging, or production environments.
+
+### Check export error logging manually
+
+The small Compose example uses one Logstash output and an OTLP/HTTP Collector,
+without authentication. With Java 17 and Docker Compose available, build the gem
+and send five events:
+
+```sh
+make gem
+docker compose -f tests/integration/compose.yml build
+docker compose -f tests/integration/compose.yml up -d collector
+docker compose -f tests/integration/compose.yml run --rm logstash
+docker compose -f tests/integration/compose.yml logs collector
+```
+
+The Collector should print `OTLP manual export test` for the received events.
+To simulate an unavailable destination, stop it and send again:
+
+```sh
+docker compose -f tests/integration/compose.yml stop collector
+docker compose -f tests/integration/compose.yml run --rm --no-deps logstash
+docker compose -f tests/integration/compose.yml down
+```
+
+Logstash should print `OTLP export failed: output_id=manual_otlp
+endpoint=http://collector:4318/v1/logs records=5`. Repeated failures are logged
+at most once every 30 seconds per output. This diagnostic does not resend events.
 
 ## Notes
 
