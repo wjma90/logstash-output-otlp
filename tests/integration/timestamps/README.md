@@ -57,3 +57,24 @@ simulate sending without the fix.
    ```sh
    docker compose down
    ```
+
+## Test with the fix disabled in Java
+
+Temporarily change this line in `src/main/java/org/otlp/Otlp.java`:
+
+```diff
+- Instant adjustedTimestamp = timestampWithNanosecondDisambiguation(eventTimestamp);
++ Instant adjustedTimestamp = eventTimestamp;
+```
+
+From the repository root, rebuild and run:
+
+```sh
+make gem
+docker compose -f tests/integration/timestamps/compose.yml up -d --build --force-recreate --wait
+docker compose -f tests/integration/timestamps/compose.yml run --rm generator
+```
+
+Repeat the query above with the new `run_id`: `timestamp-fixed` should now also
+return only **1 record**. Restore the original Java line and repeat these commands
+and the query; `timestamp-fixed` should return **1,000 records** again.
