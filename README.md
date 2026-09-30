@@ -301,6 +301,12 @@ Logstash should print `OTLP export failed: output_id=manual_otlp
 endpoint=http://collector:4318/v1/logs records=5`. Repeated failures are logged
 at most once every 30 seconds per output. This diagnostic does not resend events.
 
+### Check concurrent logs with identical timestamps
+
+The [timestamp demo](tests/integration/timestamps/README.md) sends 1,000 logs
+with the same microsecond timestamp through Logstash and compares Loki results
+with the plugin's nanosecond adjustment and with the original timestamp restored.
+
 ## Notes
 
 **Warning** This plugin depends on OpenTelemetry logging libraries.

@@ -1,0 +1,32 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  transform/control:
+    error_mode: propagate
+    log_statements:
+      - set(log.time_unix_nano, Int(log.attributes["source_time_unix_nano"]))
+      - set(resource.attributes["service.name"], "timestamp-control")
+
+exporters:
+  otlphttp/fixed:
+    endpoint: http://loki:3100/otlp
+  otlphttp/control:
+    endpoint: http://loki:3100/otlp
+  debug/fixed:
+    verbosity: basic
+  debug/control:
+    verbosity: basic
+
+service:
+  pipelines:
+    logs/fixed:
+      receivers: [otlp]
+      exporters: [otlphttp/fixed, debug/fixed]
+    logs/control:
+      receivers: [otlp]
+      processors: [transform/control]
+      exporters: [otlphttp/control, debug/control]
