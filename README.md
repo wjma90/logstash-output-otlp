@@ -257,12 +257,35 @@ make logstashcorejar
 
 `make gem` also builds the Logstash core jar before packaging the local plugin gem.
 
+## Monitoring
+
+The output exposes the Java SDK's `LATEST` log processor and exporter metrics
+under `sdk_metrics` in Logstash's Node Stats API, preserving component,
+endpoint and error attributes. The [metrics demo](tests/integration/queue/README.md)
+shows successful exports, failures and queue saturation in Prometheus.
+`kuskoman/logstash-exporter` v1.9.2 needs additional collector support for these
+custom fields; the demo uses JSON Exporter mappings.
+
 ## Running locally
 
-`docker-compose up`
+With Java 17 and Docker running:
 
-The local Dockerfile installs a gem built from this repository with `logstash-plugin install --no-verify --local`.
-That pattern is intended for local smoke tests of the local gem only.
+```sh
+make gem
+docker compose up --build
+```
+
+Logstash sends ten records over OTLP/HTTP. The Collector (`otel`) prints them
+using its `debug` exporter with the body `OTLP local example`.
+
+From another terminal:
+
+```sh
+docker compose logs otel
+docker compose down
+```
+
+The Dockerfile installs the local gem built from this repository.
 
 For a production-like image that installs the published gem from RubyGems, use:
 
@@ -271,41 +294,10 @@ FROM docker.elastic.co/logstash/logstash:9.4.4@sha256:c1aeca2bbf56148c1c868957e1
 RUN logstash-plugin install logstash-output-otlp
 ```
 
-The certificates under `config/tls` are local test certificates used by the Docker Compose example.
-Do not reuse those private keys or certificates in shared, staging, or production environments.
+### Integration tests
 
-### Check export error logging manually
-
-The small Compose example uses one Logstash output and an OTLP/HTTP Collector,
-without authentication. With Java 17 and Docker Compose available, build the gem
-and send five events:
-
-```sh
-make gem
-docker compose -f tests/integration/compose.yml build
-docker compose -f tests/integration/compose.yml up -d collector
-docker compose -f tests/integration/compose.yml run --rm logstash
-docker compose -f tests/integration/compose.yml logs collector
-```
-
-The Collector should print `OTLP manual export test` for the received events.
-To simulate an unavailable destination, stop it and send again:
-
-```sh
-docker compose -f tests/integration/compose.yml stop collector
-docker compose -f tests/integration/compose.yml run --rm --no-deps logstash
-docker compose -f tests/integration/compose.yml down
-```
-
-Logstash should print `OTLP export failed: output_id=manual_otlp
-endpoint=http://collector:4318/v1/logs records=5`. Repeated failures are logged
-at most once every 30 seconds per output. This diagnostic does not resend events.
-
-### Check concurrent logs with identical timestamps
-
-The [timestamp demo](tests/integration/timestamps/README.md) sends 1,000 logs
-with the same microsecond timestamp through Logstash and compares Loki results
-with the plugin's nanosecond adjustment and with the original timestamp restored.
+See [tests/integration](tests/integration/README.md) for manual tests of export
+error logging, queue metrics in Prometheus and the timestamp fix for Loki.
 
 ## Notes
 

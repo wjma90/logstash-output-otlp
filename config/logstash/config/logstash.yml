@@ -1,3 +1,5 @@
 node.name: docker
 api.environment: local
-log.level: debug
+log.level: info
+pipeline.workers: 1
+xpack.monitoring.enabled: false

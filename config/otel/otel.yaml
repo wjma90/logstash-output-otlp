@@ -1,26 +1,14 @@
 receivers:
   otlp:
     protocols:
-      grpc:
-        endpoint: 0.0.0.0:4317
-        tls:
-          cert_file: /etc/otel/certs/certificate.crt
-          key_file: /etc/otel/certs/certificate.key
       http:
         endpoint: 0.0.0.0:4318
-        tls:
-          cert_file: /etc/otel/certs/certificate.crt
-          key_file: /etc/otel/certs/certificate.key
 
 exporters:
   debug:
     verbosity: detailed
-    use_internal_logger: false
 
 service:
-  telemetry:
-    logs:
-      level: "info"
   pipelines:
     logs:
       receivers: [otlp]

@@ -1,0 +1,79 @@
+modules:
+  logstash:
+    metrics:
+      - name: otel_sdk_processor_log_queue
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="queue_test")].sdk_metrics.otel_sdk_processor_log_queue_size.*}'
+        valuetype: gauge
+        labels:
+          pipeline: main
+          plugin_id: queue_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+        values:
+          size: '{.value}'
+      - name: otel_sdk_processor_log_queue
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="queue_test")].sdk_metrics.otel_sdk_processor_log_queue_capacity.*}'
+        valuetype: gauge
+        labels:
+          pipeline: main
+          plugin_id: queue_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+        values:
+          capacity: '{.value}'
+      - name: otel_sdk_processor_log
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="queue_test")].sdk_metrics.otel_sdk_processor_log_processed.*}'
+        valuetype: counter
+        labels:
+          pipeline: main
+          plugin_id: queue_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+          error_type: '{.error_type}'
+        values:
+          processed_total: '{.value}'
+      - name: otel_sdk_exporter_log
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="queue_test")].sdk_metrics.otel_sdk_exporter_log_inflight.*}'
+        valuetype: gauge
+        labels:
+          pipeline: main
+          plugin_id: queue_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+          server_address: '{.server_address}'
+          server_port: '{.server_port}'
+        values:
+          inflight: '{.value}'
+      - name: otel_sdk_exporter_log
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="queue_test")].sdk_metrics.otel_sdk_exporter_log_exported.*}'
+        valuetype: counter
+        labels:
+          pipeline: main
+          plugin_id: queue_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+          server_address: '{.server_address}'
+          server_port: '{.server_port}'
+          error_type: '{.error_type}'
+        values:
+          exported_total: '{.value}'
+      - name: otel_sdk_exporter_operation_duration_seconds
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="queue_test")].sdk_metrics.otel_sdk_exporter_operation_duration.*}'
+        valuetype: counter
+        labels:
+          pipeline: main
+          plugin_id: queue_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+          server_address: '{.server_address}'
+          server_port: '{.server_port}'
+          error_type: '{.error_type}'
+        values:
+          count: '{.count}'
+          sum: '{.sum}'

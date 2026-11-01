@@ -16,6 +16,7 @@ import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporterBuilder
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporter;
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporterBuilder;
 import io.opentelemetry.sdk.common.CompletableResultCode;
+import io.opentelemetry.sdk.common.InternalTelemetryVersion;
 import io.opentelemetry.sdk.logs.LogRecordProcessor;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.export.BatchLogRecordProcessor;
@@ -88,6 +89,7 @@ public class Otlp implements Output {
     private final AtomicBoolean shutdownStarted = new AtomicBoolean();
     private volatile boolean stopped = false;
     private final SdkLoggerProvider sdkLoggerProvider;
+    private final LogstashSdkMetrics sdkMetrics;
     private final AtomicLong emittedLogRecordSequence = new AtomicLong(0);
     private final org.apache.logging.log4j.Logger pluginLogger;
 
@@ -248,7 +250,7 @@ public class Otlp implements Output {
         throw new IllegalArgumentException(String.format("endpoint_type (%s) is not valid", endpointType));
     }
 
-    private LogRecordExporter logExporterForConfig(Configuration configuration) {
+    private LogRecordExporter logExporterForConfig(Configuration configuration, LogstashSdkMetrics metrics) {
         URI endpoint = configuration.get(ENDPOINT_CONFIG);
         String compression = configuration.get(COMPRESSION_CONFIG);
         String caPath = configuration.get(SSL_CERTIFICATE_AUTHORITIES);
@@ -271,6 +273,8 @@ public class Otlp implements Output {
             OtlpHttpLogRecordExporterBuilder builder = OtlpHttpLogRecordExporter.builder();
 
             builder.setEndpoint(endpoint.toString())
+                    .setMeterProvider(metrics.meterProvider())
+                    .setInternalTelemetryVersion(InternalTelemetryVersion.LATEST)
                     .setConnectTimeout(connectTimeout, TimeUnit.SECONDS)
                     .setTimeout(timeout, TimeUnit.SECONDS)
                     .setCompression(compression);
@@ -283,6 +287,8 @@ public class Otlp implements Output {
             OtlpGrpcLogRecordExporterBuilder builder = OtlpGrpcLogRecordExporter.builder();
 
             builder.setEndpoint(endpoint.toString())
+                    .setMeterProvider(metrics.meterProvider())
+                    .setInternalTelemetryVersion(InternalTelemetryVersion.LATEST)
                     .setConnectTimeout(connectTimeout, TimeUnit.SECONDS)
                     .setTimeout(timeout, TimeUnit.SECONDS)
                     .setCompression(compression);
@@ -342,14 +348,21 @@ public class Otlp implements Output {
 
         Resource resource = Resource.create(getResourceAttributes());
 
-        LogRecordExporter delegate = suppliedExporter != null ? suppliedExporter
-                : testEnabled ? new StreamLogRecordExporter(new PrintStream(targetStream), config.get(ENDPOINT_CONFIG))
-                : logExporterForConfig(config);
-        LogRecordExporter exporter = new DiagnosticLogRecordExporter(delegate, pluginLogger, id, config.get(ENDPOINT_CONFIG));
+        LogRecordExporter exporter = null;
         LogRecordProcessor processor = null;
+        LogstashSdkMetrics metrics = null;
         try {
+            metrics = testEnabled ? null : new LogstashSdkMetrics(pluginLogger, id, maxQueueSize,
+                    context == null ? null : context.getMetric(this));
+            sdkMetrics = metrics;
+            exporter = suppliedExporter != null ? suppliedExporter
+                    : testEnabled ? new StreamLogRecordExporter(new PrintStream(targetStream), config.get(ENDPOINT_CONFIG))
+                    : logExporterForConfig(config, metrics);
+            exporter = new DiagnosticLogRecordExporter(exporter, pluginLogger, id, config.get(ENDPOINT_CONFIG));
             processor = testEnabled ? SimpleLogRecordProcessor.create(exporter)
                     : BatchLogRecordProcessor.builder(exporter)
+                            .setMeterProvider(metrics.meterProvider())
+                            .setInternalTelemetryVersion(InternalTelemetryVersion.LATEST)
                             .setMaxQueueSize(maxQueueSize)
                             .setMaxExportBatchSize(maxBatchSize)
                             .setScheduleDelay(scheduleDelay, TimeUnit.MILLISECONDS)
@@ -360,9 +373,10 @@ public class Otlp implements Output {
                     .addLogRecordProcessor(processor)
                     .build();
         } catch (RuntimeException | Error failure) {
+            if (metrics != null) metrics.close();
             if (processor != null) {
                 processor.shutdown();
-            } else {
+            } else if (exporter != null) {
                 exporter.shutdown();
             }
             throw failure;
@@ -442,15 +456,23 @@ public class Otlp implements Output {
                         pluginLogger.error("OTLP shutdown failed: output_id={}", id, result.getFailureThrowable());
                     }
                 } finally {
-                    done.countDown();
+                    finishShutdown();
                 }
             });
         } catch (RuntimeException failure) {
             try {
                 pluginLogger.error("OTLP shutdown failed: output_id={}", id, failure);
             } finally {
-                done.countDown();
+                finishShutdown();
             }
+        }
+    }
+
+    private void finishShutdown() {
+        try {
+            if (sdkMetrics != null) sdkMetrics.close();
+        } finally {
+            done.countDown();
         }
     }
 

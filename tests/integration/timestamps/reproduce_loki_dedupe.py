@@ -4,8 +4,8 @@ import urllib.parse
 import urllib.request
 
 
-LOKI = "http://loki:3100"
-BASE_TS_NS = 1_780_598_742_704_000_000
+LOKI = "http://127.0.0.1:13100"
+BASE_TS_NS = time.time_ns()
 LINE = "Transaccion completa"
 
 

@@ -3,7 +3,7 @@ name: otlp-export-demo
 services:
   logstash:
     build:
-      context: ../..
+      context: ../../..
       dockerfile: tests/integration/Dockerfile
     environment:
       LS_JAVA_OPTS: -Xms256m -Xmx512m

@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class OtlpLifecycleTest {
     private final StubExporter exporter = new StubExporter();
     private final Set<Thread> workers = new HashSet<>();
+    private final Set<Thread> metricWorkers = new HashSet<>();
     private final ExecutorService executor = Executors.newFixedThreadPool(3, action -> {
         Thread thread = new Thread(action, "otlp-lifecycle-test");
         thread.setDaemon(true);
@@ -53,6 +54,10 @@ class OtlpLifecycleTest {
             for (Thread worker : workers) {
                 worker.join(5000);
                 assertFalse(worker.isAlive(), "SDK worker remains after shutdown");
+            }
+            for (Thread worker : metricWorkers) {
+                worker.join(5000);
+                assertFalse(worker.isAlive(), "Queue metric worker remains after shutdown");
             }
         }
     }
@@ -165,6 +170,10 @@ class OtlpLifecycleTest {
                 worker.join(5000);
                 assertFalse(worker.isAlive(), "SDK worker remains after shutdown");
             }
+            for (Thread worker : metricWorkers) {
+                worker.join(5000);
+                assertFalse(worker.isAlive(), "Queue metric worker remains after shutdown");
+            }
             assertArrayEquals(originalHandlers, logger.getHandlers());
         }
         assertEquals(3, exporter.shutdownCalls.get());
@@ -173,13 +182,25 @@ class OtlpLifecycleTest {
 
     private Otlp newOutput(boolean batchEnabled) {
         Set<Thread> previous = batchWorkers();
+        Set<Thread> previousMetrics = metricWorkers();
         Otlp plugin = new Otlp("lifecycle-test", new ConfigurationImpl(Map.of(
                 Otlp.ENDPOINT_CONFIG.name(), "http://127.0.0.1:4318/v1/logs",
                 Otlp.PROTOCOL_CONFIG.name(), "http")), null, exporter, batchEnabled);
         Set<Thread> created = batchWorkers();
         created.removeAll(previous);
         workers.addAll(created);
+        Set<Thread> createdMetrics = metricWorkers();
+        createdMetrics.removeAll(previousMetrics);
+        metricWorkers.addAll(createdMetrics);
         return plugin;
+    }
+
+    private static Set<Thread> metricWorkers() {
+        Set<Thread> result = new HashSet<>();
+        for (Thread thread : Thread.getAllStackTraces().keySet()) {
+            if (thread.getName().startsWith("otlp-sdk-metrics-")) result.add(thread);
+        }
+        return result;
     }
 
     private static Set<Thread> batchWorkers() {

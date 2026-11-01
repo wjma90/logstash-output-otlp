@@ -8,6 +8,8 @@ services:
     environment:
       LS_JAVA_OPTS: -Xms256m -Xmx512m
       XPACK_MONITORING_ENABLED: "false"
+    ports:
+      - "127.0.0.1:18081:8080"
     volumes:
       - ./logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
     command: ["--pipeline.workers", "4", "--pipeline.ecs_compatibility", "disabled", "--log.level", "info"]
@@ -33,14 +35,4 @@ services:
     ports:
       - "127.0.0.1:13100:3100"
     volumes:
-      - ../../../config/loki/loki.yaml:/etc/loki/config.yaml:ro
-
-  generator:
-    image: python:3.12-alpine
-    profiles: [manual]
-    volumes:
-      - ./generate.py:/generate.py:ro
-    command: ["python", "/generate.py"]
-    depends_on:
-      logstash:
-        condition: service_healthy
+      - ./loki.yaml:/etc/loki/config.yaml:ro

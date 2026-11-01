@@ -1,0 +1,53 @@
+name: otlp-queue-demo
+
+services:
+  logstash:
+    build:
+      context: ../../..
+      dockerfile: tests/integration/Dockerfile
+    environment:
+      LS_JAVA_OPTS: -Xms256m -Xmx512m
+      XPACK_MONITORING_ENABLED: "false"
+      OTLP_ENDPOINT: ${OTLP_ENDPOINT:-http://collector:4318/v1/logs}
+    ports:
+      - "127.0.0.1:19600:9600"
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - ./logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+    command: ["--pipeline.workers", "1", "--pipeline.ecs_compatibility", "disabled", "--log.level", "info"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9600/_node/stats/pipelines/main | grep -q '\"events\"'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      - collector
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.131.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "127.0.0.1:18888:8888"
+    volumes:
+      - ./collector.yaml:/etc/otelcol/config.yaml:ro
+
+  exporter:
+    image: quay.io/prometheuscommunity/json-exporter:v0.7.0
+    command: ["--config.file=/config.yml"]
+    ports:
+      - "127.0.0.1:17979:7979"
+    volumes:
+      - ./exporter.yml:/config.yml:ro
+    depends_on:
+      logstash:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=1h"]
+    ports:
+      - "127.0.0.1:19090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - exporter

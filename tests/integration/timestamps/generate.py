@@ -22,7 +22,7 @@ def send(record_id):
         "source_time_unix_nano": TIMESTAMP_NANOS,
     }
     request = Request(
-        "http://logstash:8080",
+        "http://127.0.0.1:18081",
         data=json.dumps(event).encode(),
         headers={"Content-Type": "application/json"},
     )
