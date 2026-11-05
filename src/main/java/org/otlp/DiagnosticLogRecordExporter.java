@@ -24,8 +24,12 @@ final class DiagnosticLogRecordExporter implements LogRecordExporter {
     private final AtomicLong failedBatches = new AtomicLong();
     private final AtomicLong failedRecords = new AtomicLong();
     private final AtomicLong exportedRecords = new AtomicLong();
-    private final AtomicLong suppressedFailures = new AtomicLong();
-    private final AtomicReference<Long> lastFailureLog = new AtomicReference<>();
+    private final FailureLogLimiter limiter;
+
+    static final class FailureLogLimiter {
+        private final AtomicLong suppressedFailures = new AtomicLong();
+        private final AtomicReference<Long> lastFailureLog = new AtomicReference<>();
+    }
 
     DiagnosticLogRecordExporter(LogRecordExporter delegate, Logger logger, String outputId, URI endpoint) {
         this(delegate, logger, outputId, endpoint, System::nanoTime);
@@ -33,11 +37,22 @@ final class DiagnosticLogRecordExporter implements LogRecordExporter {
 
     DiagnosticLogRecordExporter(LogRecordExporter delegate, Logger logger, String outputId,
                                 URI endpoint, LongSupplier nanoTime) {
+        this(delegate, logger, outputId, endpoint, nanoTime, new FailureLogLimiter());
+    }
+
+    DiagnosticLogRecordExporter(LogRecordExporter delegate, Logger logger, String outputId,
+                                URI endpoint, FailureLogLimiter limiter) {
+        this(delegate, logger, outputId, endpoint, System::nanoTime, limiter);
+    }
+
+    private DiagnosticLogRecordExporter(LogRecordExporter delegate, Logger logger, String outputId,
+                                        URI endpoint, LongSupplier nanoTime, FailureLogLimiter limiter) {
         this.delegate = Objects.requireNonNull(delegate);
         this.logger = Objects.requireNonNull(logger);
         this.outputId = Objects.requireNonNull(outputId);
         this.endpoint = diagnosticEndpoint(endpoint);
         this.nanoTime = Objects.requireNonNull(nanoTime);
+        this.limiter = Objects.requireNonNull(limiter);
     }
 
     @Override
@@ -67,10 +82,10 @@ final class DiagnosticLogRecordExporter implements LogRecordExporter {
 
     private void logFailure(int recordCount, Throwable failure) {
         long now = nanoTime.getAsLong();
-        Long previous = lastFailureLog.get();
+        Long previous = limiter.lastFailureLog.get();
         if ((previous == null || now - previous >= FAILURE_LOG_INTERVAL_NANOS)
-                && lastFailureLog.compareAndSet(previous, now)) {
-            long suppressed = suppressedFailures.getAndSet(0);
+                && limiter.lastFailureLog.compareAndSet(previous, now)) {
+            long suppressed = limiter.suppressedFailures.getAndSet(0);
             if (failure == null) {
                 logger.error("OTLP export failed: output_id={} endpoint={} records={} suppressed_failures={} cause=unavailable",
                         outputId, endpoint, recordCount, suppressed);
@@ -79,7 +94,7 @@ final class DiagnosticLogRecordExporter implements LogRecordExporter {
                         outputId, endpoint, recordCount, suppressed, failure);
             }
         } else {
-            suppressedFailures.incrementAndGet();
+            limiter.suppressedFailures.incrementAndGet();
         }
     }
 

@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
@@ -170,6 +171,26 @@ public class OtlpTest {
             assertTrue(logs.contains(Level.WARN, "ssl_disable_tls_verification is enabled"));
             assertTrue(logs.contains(Level.WARN, "trust any TLS certificate"));
         }
+    }
+
+    @Test
+    public void tlsBypassIgnoresTheConfiguredCaFile() {
+        Configuration config = new ConfigurationImpl(Map.of(
+                "endpoint", "https://localhost:4318/v1/logs", "protocol", "http",
+                "ssl_disable_tls_verification", true,
+                "ssl_certificate_authorities", "/missing-otlp-test-ca.pem"));
+        Otlp output = new Otlp("tls-bypass", config, null);
+        output.stop();
+    }
+
+    @Test
+    public void verifiedTlsRejectsAnUnreadableCaFile() {
+        Configuration config = new ConfigurationImpl(Map.of(
+                "endpoint", "https://localhost:4318/v1/logs", "protocol", "http",
+                "ssl_certificate_authorities", "/missing-otlp-test-ca.pem"));
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> new Otlp("tls-ca", config, null));
+        assertTrue(failure.getMessage().contains("Cannot read CA file"));
     }
 
     @Test

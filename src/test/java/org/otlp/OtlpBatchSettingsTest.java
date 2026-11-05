@@ -9,7 +9,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.logstash.plugins.ConfigurationImpl;
 
-import java.time.Duration;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -34,23 +33,26 @@ class OtlpBatchSettingsTest {
     }
 
     @Test
-    void registersBatchOptionsWithSdkDefaults() {
+    void registersSharedQueueOptionsWithCompatibleDefaults() {
         output = newOutput(Map.of());
         List<String> names = output.configSchema().stream().map(setting -> setting.name()).toList();
-        assertTrue(names.containsAll(List.of("max_queue_size", "max_batch_size",
-                "schedule_delay_millis", "export_timeout_millis")));
+        assertTrue(names.containsAll(List.of("queue_size", "num_consumers", "max_batch_size",
+                "schedule_delay_millis", "max_queue_size", "export_timeout_millis")));
 
         ConfigurationImpl defaults = new ConfigurationImpl(Map.of());
-        assertEquals(2048L, defaults.get(Otlp.MAX_QUEUE_SIZE_CONFIG));
+        assertEquals(2048L, defaults.get(Otlp.QUEUE_SIZE_CONFIG));
+        assertEquals(1L, defaults.get(Otlp.NUM_CONSUMERS_CONFIG));
         assertEquals(512L, defaults.get(Otlp.MAX_BATCH_SIZE_CONFIG));
         assertEquals(1000L, defaults.get(Otlp.SCHEDULE_DELAY_CONFIG));
         assertEquals(30000L, defaults.get(Otlp.EXPORT_TIMEOUT_CONFIG));
+        assertTrue(Otlp.MAX_QUEUE_SIZE_CONFIG.deprecated());
+        assertTrue(Otlp.EXPORT_TIMEOUT_CONFIG.deprecated());
     }
 
     @Test
     void rejectsInvalidSettingsBeforeStartingTheExporter() {
-        for (String name : List.of("max_queue_size", "max_batch_size",
-                "schedule_delay_millis", "export_timeout_millis", "timeout")) {
+        for (String name : List.of("queue_size", "max_queue_size", "num_consumers", "max_batch_size",
+                "schedule_delay_millis", "timeout", "connect_timeout")) {
             for (long value : new long[]{0, -1, Long.MAX_VALUE}) {
                 IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
                         () -> output = newOutput(Map.of(name, value)));
@@ -58,18 +60,35 @@ class OtlpBatchSettingsTest {
             }
         }
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                () -> output = newOutput(Map.of("max_queue_size", 2L, "max_batch_size", 3L)));
-        assertTrue(error.getMessage().contains("max_batch_size must not exceed max_queue_size"));
+                () -> output = newOutput(Map.of("queue_size", 2L, "max_batch_size", 3L)));
+        assertTrue(error.getMessage().contains("max_batch_size must not exceed queue_size"));
         error = assertThrows(IllegalArgumentException.class,
-                () -> output = newOutput(Map.of("export_timeout_millis", 9999L)));
-        assertTrue(error.getMessage().contains("export_timeout_millis must be at least timeout * 1000"));
+                () -> output = newOutput(Map.of("num_consumers", 257L)));
+        assertTrue(error.getMessage().contains("num_consumers"));
+        error = assertThrows(IllegalArgumentException.class,
+                () -> output = newOutput(Map.of("queue_size", 2048L, "max_queue_size", 2048L)));
+        assertTrue(error.getMessage().contains("not both"));
         assertEquals(0, exporter.shutdownCalls);
         assertTrue(exporter.batches.isEmpty());
     }
 
     @Test
+    void acceptsNumericEnvironmentValuesAndRejectsInvalidText() throws Exception {
+        for (String name : List.of("queue_size", "num_consumers", "max_batch_size", "schedule_delay_millis",
+                "timeout", "connect_timeout")) {
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                    () -> newOutput(Map.of(name, "1.5")));
+            assertTrue(error.getMessage().contains(name));
+        }
+        output = newOutput(Map.of("queue_size", "32", "num_consumers", "1", "max_batch_size", "1",
+                "schedule_delay_millis", "100", "timeout", "10", "connect_timeout", "10"));
+        output.output(List.of(event("environment config")));
+        assertEquals(List.of("environment config"), exporter.batches.poll(2, SECONDS));
+    }
+
+    @Test
     void fullBatchExportsBeforeTheScheduledDelay() throws Exception {
-        output = newOutput(Map.of("max_queue_size", 4L, "max_batch_size", 2L,
+        output = newOutput(Map.of("queue_size", 4L, "max_batch_size", 2L,
                 "schedule_delay_millis", 60000L));
         output.output(List.of(event("first")));
         assertNull(exporter.batches.poll(100, MILLISECONDS));
@@ -103,17 +122,37 @@ class OtlpBatchSettingsTest {
     }
 
     @Test
-    void exportTimeoutBoundsHowLongTheProcessorWaits() throws Exception {
-        exporter.firstResult = new CompletableResultCode();
-        output = newOutput(Map.of("max_batch_size", 1L, "export_timeout_millis", 1000L,
-                "timeout", 1L));
-        output.output(List.of(event("pending export")));
-        assertEquals(List.of("pending export"), exporter.batches.poll(2, SECONDS));
-
-        assertTimeoutPreemptively(Duration.ofSeconds(3), output::stop);
-
+    void requestTimeoutIsIndependentOfTheBatchFormationDelay() {
+        output = newOutput(Map.of("timeout", 60L, "schedule_delay_millis", 10L));
+        output.output(List.of(event("independent timeouts")));
+        output.stop();
         assertEquals(1, exporter.shutdownCalls);
+    }
+
+    @Test
+    void acceptsDeprecatedExportTimeoutWithLongerRequestTimeout() {
+        output = newOutput(Map.of("export_timeout_millis", 30000L, "timeout", 60L));
+        output.output(List.of(event("legacy config")));
+        output.stop();
+
+        assertEquals(List.of("legacy config"), List.copyOf(exporter.bodies));
+        assertEquals(1, exporter.shutdownCalls);
+    }
+
+    @Test
+    void ignoresDeprecatedExportTimeoutWhileBatchIsPending() throws Exception {
+        exporter.firstResult = new CompletableResultCode();
+        output = newOutput(Map.of("export_timeout_millis", 1L, "timeout", 60L,
+                "queue_size", 4L, "max_batch_size", 1L));
+        output.output(List.of(event("in flight")));
+        assertEquals(List.of("in flight"), exporter.batches.poll(2, SECONDS));
+
+        output.output(List.of(event("queued")));
+
+        assertNull(exporter.batches.poll(100, MILLISECONDS));
         assertFalse(exporter.firstResult.isDone());
+        exporter.firstResult.succeed();
+        assertEquals(List.of("queued"), exporter.batches.poll(2, SECONDS));
     }
 
     private Otlp newOutput(Map<String, Object> settings) {

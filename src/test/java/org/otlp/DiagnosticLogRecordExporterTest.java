@@ -36,6 +36,24 @@ class DiagnosticLogRecordExporterTest {
     private static final long INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(30);
 
     @Test
+    void consumersShareTheOutputFailureLogLimit() {
+        try (LogCapture capture = new LogCapture()) {
+            var limiter = new DiagnosticLogRecordExporter.FailureLogLimiter();
+            var first = new DiagnosticLogRecordExporter(new StubExporter(CompletableResultCode.ofFailure()),
+                    capture.logger, "shared-output", ENDPOINT, limiter);
+            var second = new DiagnosticLogRecordExporter(new StubExporter(CompletableResultCode.ofFailure()),
+                    capture.logger, "shared-output", ENDPOINT, limiter);
+
+            first.export(records(2));
+            second.export(records(3));
+
+            assertEquals(1, capture.events.size());
+            assertCounts(first, 0, 1, 2);
+            assertCounts(second, 0, 1, 3);
+        }
+    }
+
+    @Test
     void synchronousSuccessCountsRecordsAndReturnsDelegateResult() {
         try (LogCapture capture = new LogCapture()) {
             CompletableResultCode success = CompletableResultCode.ofSuccess();

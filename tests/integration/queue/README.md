@@ -1,18 +1,18 @@
 # Test export queue metrics
 
-This test uses a 32-record SDK queue, batches of 1, and a JSON exporter for Prometheus.
+This test uses a shared 32-record queue, one consumer, batches of 1, and a JSON exporter for Prometheus.
 Metrics appear under the output's `sdk_metrics` in Logstash's Node Stats API.
 Prometheus exposes these SDK series:
 
 | Metric | Meaning |
 | --- | --- |
-| `otel_sdk_processor_log_queue_size` | Records waiting in the SDK queue, excluding the export in progress. |
+| `otel_sdk_processor_log_queue_size` | Records waiting in the shared queue, excluding the export in progress. |
 | `otel_sdk_processor_log_queue_capacity` | Queue capacity. |
 | `otel_sdk_processor_log_processed_total{error_type="queue_full"}` | Total records dropped because the queue was full. |
 
 Metrics refresh every second. Drops produce a `WARN`, limited to one every 30 seconds.
 Run the generator locally with Python 3; use `curl` and `jq` to check the results.
-The plugin uses the SDK's `LATEST` schema with component, endpoint and error labels.
+Processor metrics use the OTel SDK names; exporter metrics come from the SDK's `LATEST` schema.
 
 This demo uses JSON Exporter with explicit mappings. `kuskoman/logstash-exporter`
 v1.9.2 ignores these custom fields; using it alone requires adding support in its
@@ -68,7 +68,7 @@ v1.9.2 ignores these custom fields; using it alone requires adding support in it
 
 4. **Full queue:** run this block together. The 30-second sleep after generation
    gives you time to inspect Prometheus while the queue is full. Keep the total
-   Collector pause below the 120-second export timeout, including generation time.
+   Collector pause below the 120-second request timeout, including generation time.
 
    ```sh
    docker compose up -d --force-recreate --wait
@@ -115,5 +115,4 @@ The first WARN may appear before the burst ends and show fewer drops than the fi
    docker compose down
    ```
 
-SDK metric conventions are in Development. Values follow Java SDK 1.62.0's
-implementation of `LATEST`; see [SDK self-monitoring](https://opentelemetry.io/docs/languages/java/sdk/#sdk-self-monitoring-metrics).
+SDK metric conventions are in Development; see [SDK self-monitoring](https://opentelemetry.io/docs/languages/java/sdk/#sdk-self-monitoring-metrics).

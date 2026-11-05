@@ -22,3 +22,5 @@ VERSION
 .DS_Store
 .nova
 *.dylib
+.vscode
+.local

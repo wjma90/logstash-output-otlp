@@ -1,0 +1,51 @@
+name: otlp-regression-load-demo
+
+services:
+  logstash:
+    extends:
+      file: ../consumers/compose.yml
+      service: logstash
+    environment:
+      LS_JAVA_OPTS: ${LS_JAVA_OPTS:--Xms1g -Xmx1g}
+      NUM_CONSUMERS: ${NUM_CONSUMERS:-2}
+      QUEUE_SIZE: ${QUEUE_SIZE:-24576}
+      MAX_BATCH_SIZE: ${MAX_BATCH_SIZE:-3000}
+      OTLP_PROTOCOL: grpc
+      OTLP_ENDPOINT: http://toxiproxy:4317
+    depends_on:
+      - toxiproxy
+
+  collector:
+    extends:
+      file: ../consumers/compose.yml
+      service: collector
+    volumes:
+      - ./collector.yaml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      - loki
+
+  exporter:
+    extends:
+      file: ../consumers/compose.yml
+      service: exporter
+
+  prometheus:
+    extends:
+      file: ../consumers/compose.yml
+      service: prometheus
+
+  toxiproxy:
+    extends:
+      file: ../consumers/compose.latency.yml
+      service: toxiproxy
+
+  loki:
+    extends:
+      file: ../common/loki/compose.yml
+      service: loki
+    command:
+      - -config.file=/etc/loki/config.yaml
+      - -distributor.ingestion-rate-limit-mb=64
+      - -distributor.ingestion-burst-size-mb=128
+      - -ingester.per-stream-rate-limit=64MB
+      - -ingester.per-stream-rate-limit-burst=128MB

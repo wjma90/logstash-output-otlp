@@ -4,6 +4,10 @@ Loki can deduplicate logs with identical labels, timestamp and message. This tes
 sends 1,000 concurrent records: `timestamp-control` uses the original microsecond
 timestamp; `timestamp-fixed` keeps the plugin's nanosecond adjustment.
 
+Loki uses the shared service and configuration in [common/loki](../common/loki/).
+Stop [regression-load](../regression-load/README.md) before starting this test:
+both publish Loki on port `13100`.
+
 1. Build the gem with Java 17 and `make gem` from the repository root, then start:
 
    ```sh

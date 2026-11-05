@@ -1,0 +1,114 @@
+modules:
+  logstash:
+    metrics:
+      - name: otlp_exporter_log
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="consumers_test")].sdk_metrics.otlp_exporter_log_rejected.*}'
+        valuetype: counter
+        labels:
+          pipeline: main
+          plugin_id: consumers_test
+          error_type: '{.error_type}'
+        values:
+          rejected_total: '{.value}'
+      - name: otel_sdk_processor_log_queue
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="consumers_test")].sdk_metrics.otel_sdk_processor_log_queue_size.*}'
+        valuetype: gauge
+        labels:
+          pipeline: main
+          plugin_id: consumers_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+        values:
+          size: '{.value}'
+      - name: otel_sdk_processor_log_queue
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="consumers_test")].sdk_metrics.otel_sdk_processor_log_queue_capacity.*}'
+        valuetype: gauge
+        labels:
+          pipeline: main
+          plugin_id: consumers_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+        values:
+          capacity: '{.value}'
+      - name: otel_sdk_processor_log
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="consumers_test")].sdk_metrics.otel_sdk_processor_log_processed.*}'
+        valuetype: counter
+        labels:
+          pipeline: main
+          plugin_id: consumers_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+          error_type: '{.error_type}'
+        values:
+          processed_total: '{.value}'
+      - name: otel_sdk_exporter_log
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="consumers_test")].sdk_metrics.otel_sdk_exporter_log_inflight.*}'
+        valuetype: gauge
+        labels:
+          pipeline: main
+          plugin_id: consumers_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+          server_address: '{.server_address}'
+          server_port: '{.server_port}'
+        values:
+          inflight: '{.value}'
+      - name: otel_sdk_exporter_log
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="consumers_test")].sdk_metrics.otel_sdk_exporter_log_exported.*}'
+        valuetype: counter
+        labels:
+          pipeline: main
+          plugin_id: consumers_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+          server_address: '{.server_address}'
+          server_port: '{.server_port}'
+          error_type: '{.error_type}'
+        values:
+          exported_total: '{.value}'
+      - name: otel_sdk_exporter_operation_duration_seconds
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="consumers_test")].sdk_metrics.otel_sdk_exporter_operation_duration.*}'
+        valuetype: counter
+        labels:
+          pipeline: main
+          plugin_id: consumers_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+          server_address: '{.server_address}'
+          server_port: '{.server_port}'
+          error_type: '{.error_type}'
+        values:
+          count: '{.count}'
+          sum: '{.sum}'
+      - name: logstash_jvm_heap_used_bytes
+        path: '{.jvm.mem.heap_used_in_bytes}'
+        valuetype: gauge
+      - name: logstash_jvm_heap_committed_bytes
+        path: '{.jvm.mem.heap_committed_in_bytes}'
+        valuetype: gauge
+      - name: logstash_jvm_heap_max_bytes
+        path: '{.jvm.mem.heap_max_in_bytes}'
+        valuetype: gauge
+      - name: logstash_jvm_threads
+        path: '{.jvm.threads.count}'
+        valuetype: gauge
+      - name: logstash_process_cpu_percent
+        path: '{.process.cpu.percent}'
+        valuetype: gauge
+      - name: logstash_process_cpu_milliseconds_total
+        path: '{.process.cpu.total_in_millis}'
+        valuetype: counter
+      - name: logstash_jvm_gc
+        type: object
+        path: '{.jvm.gc.collectors}'
+        valuetype: counter
+        values:
+          young_collection_milliseconds_total: '{.young.collection_time_in_millis}'
+          old_collection_milliseconds_total: '{.old.collection_time_in_millis}'
