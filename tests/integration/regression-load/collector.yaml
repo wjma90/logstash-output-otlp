@@ -1,0 +1,50 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch/fixed:
+    send_batch_size: 1000
+    send_batch_max_size: 1000
+    timeout: 100ms
+  batch/control:
+    send_batch_size: 1000
+    send_batch_max_size: 1000
+    timeout: 100ms
+  transform/control:
+    error_mode: propagate
+    log_statements:
+      - set(log.time_unix_nano, Int(log.attributes["source_time_unix_nano"])) where log.attributes["source_time_unix_nano"] != nil
+      - set(resource.attributes["service.name"], "timestamp-control")
+
+exporters:
+  otlphttp/fixed:
+    endpoint: http://loki:3100/otlp
+  otlphttp/control:
+    endpoint: http://loki:3100/otlp
+
+service:
+  telemetry:
+    logs:
+      level: warn
+    metrics:
+      level: detailed
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    logs/fixed:
+      receivers: [otlp]
+      processors: [batch/fixed]
+      exporters: [otlphttp/fixed]
+    logs/control:
+      receivers: [otlp]
+      processors: [transform/control, batch/control]
+      exporters: [otlphttp/control]

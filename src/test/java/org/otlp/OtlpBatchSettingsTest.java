@@ -37,15 +37,16 @@ class OtlpBatchSettingsTest {
         output = newOutput(Map.of());
         List<String> names = output.configSchema().stream().map(setting -> setting.name()).toList();
         assertTrue(names.containsAll(List.of("queue_size", "num_consumers", "max_batch_size",
-                "schedule_delay_millis", "max_queue_size")));
-        assertFalse(names.contains("export_timeout_millis"));
+                "schedule_delay_millis", "max_queue_size", "export_timeout_millis")));
 
         ConfigurationImpl defaults = new ConfigurationImpl(Map.of());
         assertEquals(2048L, defaults.get(Otlp.QUEUE_SIZE_CONFIG));
         assertEquals(1L, defaults.get(Otlp.NUM_CONSUMERS_CONFIG));
         assertEquals(512L, defaults.get(Otlp.MAX_BATCH_SIZE_CONFIG));
         assertEquals(1000L, defaults.get(Otlp.SCHEDULE_DELAY_CONFIG));
+        assertEquals(30000L, defaults.get(Otlp.EXPORT_TIMEOUT_CONFIG));
         assertTrue(Otlp.MAX_QUEUE_SIZE_CONFIG.deprecated());
+        assertTrue(Otlp.EXPORT_TIMEOUT_CONFIG.deprecated());
     }
 
     @Test
@@ -126,6 +127,32 @@ class OtlpBatchSettingsTest {
         output.output(List.of(event("independent timeouts")));
         output.stop();
         assertEquals(1, exporter.shutdownCalls);
+    }
+
+    @Test
+    void acceptsDeprecatedExportTimeoutWithLongerRequestTimeout() {
+        output = newOutput(Map.of("export_timeout_millis", 30000L, "timeout", 60L));
+        output.output(List.of(event("legacy config")));
+        output.stop();
+
+        assertEquals(List.of("legacy config"), List.copyOf(exporter.bodies));
+        assertEquals(1, exporter.shutdownCalls);
+    }
+
+    @Test
+    void ignoresDeprecatedExportTimeoutWhileBatchIsPending() throws Exception {
+        exporter.firstResult = new CompletableResultCode();
+        output = newOutput(Map.of("export_timeout_millis", 1L, "timeout", 60L,
+                "queue_size", 4L, "max_batch_size", 1L));
+        output.output(List.of(event("in flight")));
+        assertEquals(List.of("in flight"), exporter.batches.poll(2, SECONDS));
+
+        output.output(List.of(event("queued")));
+
+        assertNull(exporter.batches.poll(100, MILLISECONDS));
+        assertFalse(exporter.firstResult.isDone());
+        exporter.firstResult.succeed();
+        assertEquals(List.of("queued"), exporter.batches.poll(2, SECONDS));
     }
 
     private Otlp newOutput(Map<String, Object> settings) {

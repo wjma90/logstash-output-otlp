@@ -299,3 +299,9 @@ between Logstash and the local Collector; no production endpoint is used.
    docker compose -f compose.yml -f compose.latency.yml down
    unset QUEUE_SIZE MAX_BATCH_SIZE LS_JAVA_OPTS
    ```
+
+## Combined load and Loki regression
+
+Use [regression-load](../regression-load/README.md) to check sustained load, Loki
+timestamps and recovery after an export outage. Stop this scenario first because
+the two tests share host ports.

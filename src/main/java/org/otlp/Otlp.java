@@ -82,6 +82,8 @@ public class Otlp implements Output {
             PluginConfigSpec.numSetting("max_batch_size", 512);
     public static final PluginConfigSpec<Long> SCHEDULE_DELAY_CONFIG =
             PluginConfigSpec.numSetting("schedule_delay_millis", 1000);
+    public static final PluginConfigSpec<Long> EXPORT_TIMEOUT_CONFIG =
+            PluginConfigSpec.numSetting("export_timeout_millis", 30000, true, false);
 
     public static final PluginConfigSpec<Map<String, Object>>  ATTRIBUTES_CONFIG = PluginConfigSpec.hashSetting("attributes",null, false, false);
     public static final PluginConfigSpec<Map<String, Object>> RESOURCE_CONFIG = PluginConfigSpec.hashSetting("resource", null, false, false);
@@ -365,6 +367,9 @@ public class Otlp implements Output {
         if (maxBatchSize > maxQueueSize) {
             throw new IllegalArgumentException("max_batch_size must not exceed queue_size");
         }
+        if (config.contains(EXPORT_TIMEOUT_CONFIG)) {
+            pluginLogger.warn("export_timeout_millis is deprecated and ignored. Remove it from the configuration; use timeout (seconds) to limit each export request, including retries.");
+        }
 
         Resource resource = Resource.create(getResourceAttributes());
         sdkMetrics = testEnabled ? null : new LogstashSdkMetrics(pluginLogger, id, maxQueueSize,
@@ -627,7 +632,8 @@ public class Otlp implements Output {
                 MAX_QUEUE_SIZE_CONFIG,
                 NUM_CONSUMERS_CONFIG,
                 MAX_BATCH_SIZE_CONFIG,
-                SCHEDULE_DELAY_CONFIG
+                SCHEDULE_DELAY_CONFIG,
+                EXPORT_TIMEOUT_CONFIG
         ));
     }
 

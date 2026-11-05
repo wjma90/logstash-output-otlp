@@ -112,6 +112,7 @@ output {
 | num_consumers                | long | No |
 | max_batch_size               | long | No |
 | schedule_delay_millis        | long | No |
+| export_timeout_millis        | long | No (Deprecated; ignored) |
 | ssl_disable_tls_verification | [boolean](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)                         | No |
 | ssl_certificate_authorities  | [string](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)                          | No |
 | resource                     | [Hash](https://www.elastic.co/guide/en/logstash/latest/configuration-file-structure.html#hash)                            | No |
@@ -172,8 +173,10 @@ created only for Logstash configuration validation do not start background work.
 Queue capacity and an initial size of zero are visible before the first event.
 
 `max_queue_size` remains a deprecated alias for `queue_size`; configure only one.
-Remove `export_timeout_millis` from existing configurations: it is no longer
-supported. Network limits remain `connect_timeout` and `timeout`, in seconds.
+`export_timeout_millis` is accepted for compatibility but deprecated and ignored.
+When configured, it emits a WARN without preventing startup. Remove it when
+updating your configuration; it does not override `timeout` or add a batch timer.
+Network limits remain `connect_timeout` and `timeout`, in seconds.
 
 The HTTP and gRPC exporters use the SDK's exponential backoff for transient failures:
 
@@ -345,7 +348,9 @@ RUN logstash-plugin install logstash-output-otlp
 ### Integration tests
 
 See [tests/integration](tests/integration/README.md) for manual tests of export
-errors, queue metrics, consumer stress and the timestamp fix for Loki.
+errors, queue metrics, consumer comparisons and the timestamp fix for Loki.
+The [regression load test](tests/integration/regression-load/README.md) combines
+sustained load, Loki timestamp checks and recovery after an export outage.
 
 ## Notes
 

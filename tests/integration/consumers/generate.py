@@ -5,12 +5,14 @@ import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, wait
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 
 COUNT = int(os.environ.get("COUNT", "50000"))
 CONCURRENCY = int(os.environ.get("CONCURRENCY", "16"))
 REQUEST_BATCH_SIZE = int(os.environ.get("REQUEST_BATCH_SIZE", "1"))
+TIMESTAMP_GROUP_SIZE = int(os.environ.get("TIMESTAMP_GROUP_SIZE", "0"))
 PAYLOAD_BYTES = int(os.environ.get("PAYLOAD_BYTES", "1024"))
 ROUNDS = int(os.environ.get("ROUNDS", "1"))
 PAUSE_SECONDS = float(os.environ.get("PAUSE_SECONDS", "15"))
@@ -31,11 +33,13 @@ if (
     raise SystemExit("Counts and report interval must be positive; payload sizes, duration, rate and pauses cannot be negative")
 if ENDPOINT.scheme != "http" or not ENDPOINT.hostname or ENDPOINT.username:
     raise SystemExit("ENDPOINT must be a plain HTTP URL without credentials")
+if TIMESTAMP_GROUP_SIZE < 0:
+    raise SystemExit("TIMESTAMP_GROUP_SIZE cannot be negative")
 MESSAGES = tuple("x" * size for size in PAYLOAD_SIZES)
 PATH = ENDPOINT.path or "/"
 
 
-def send(worker, run_id, started, progress):
+def send(worker, run_id, started, progress, base_time_unix_nano):
     connection = http.client.HTTPConnection(ENDPOINT.hostname, ENDPOINT.port or 80, timeout=30)
     accepted = 0
     failed = 0
@@ -57,7 +61,13 @@ def send(worker, run_id, started, progress):
             for _ in range(REQUEST_BATCH_SIZE):
                 if deadline is None and record_id >= COUNT:
                     break
-                records.append({"message": MESSAGES[record_id % len(MESSAGES)], "record_id": str(record_id), "run_id": run_id})
+                record = {"message": MESSAGES[record_id % len(MESSAGES)], "record_id": str(record_id), "run_id": run_id}
+                if TIMESTAMP_GROUP_SIZE:
+                    timestamp_nanos = base_time_unix_nano + record_id // TIMESTAMP_GROUP_SIZE * 1_000_000
+                    seconds, nanos = divmod(timestamp_nanos, 1_000_000_000)
+                    record["@timestamp"] = datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + f".{nanos // 1000:06d}Z"
+                    record["source_time_unix_nano"] = str(timestamp_nanos)
+                records.append(record)
                 record_id += CONCURRENCY
             body = json.dumps(records[0] if REQUEST_BATCH_SIZE == 1 else records).encode()
             try:
@@ -102,9 +112,10 @@ failed_records = 0
 with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
     for current_round in range(1, ROUNDS + 1):
         run_id = uuid.uuid4().hex
+        base_time_unix_nano = time.time_ns() // 1000 * 1000
         started = time.monotonic()
         progress = [(0, 0, 0, None)] * CONCURRENCY
-        futures = [pool.submit(send, worker, run_id, started, progress) for worker in range(CONCURRENCY)]
+        futures = [pool.submit(send, worker, run_id, started, progress, base_time_unix_nano) for worker in range(CONCURRENCY)]
         pending = set(futures)
         while pending:
             _, pending = wait(pending, timeout=REPORT_INTERVAL_SECONDS)
