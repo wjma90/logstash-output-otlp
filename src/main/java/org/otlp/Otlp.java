@@ -17,9 +17,9 @@ import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporter;
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporterBuilder;
 import io.opentelemetry.sdk.common.CompletableResultCode;
 import io.opentelemetry.sdk.common.InternalTelemetryVersion;
+import io.opentelemetry.sdk.common.export.RetryPolicy;
 import io.opentelemetry.sdk.logs.LogRecordProcessor;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
-import io.opentelemetry.sdk.logs.export.BatchLogRecordProcessor;
 import io.opentelemetry.sdk.logs.export.LogRecordExporter;
 import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
 import io.opentelemetry.sdk.resources.Resource;
@@ -36,11 +36,13 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.security.cert.X509Certificate;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 // class name must match plugin name
 @LogstashPlugin(name = "otlp")
@@ -62,14 +64,24 @@ public class Otlp implements Output {
             PluginConfigSpec.numSetting("connect_timeout", 10);
     public static final PluginConfigSpec<Long> TIMEOUT =
             PluginConfigSpec.numSetting("timeout", 10);
+    public static final PluginConfigSpec<Long> RETRY_INITIAL_BACKOFF_CONFIG =
+            PluginConfigSpec.numSetting("retry_initial_backoff_millis", 1000);
+    public static final PluginConfigSpec<Long> RETRY_MAX_BACKOFF_CONFIG =
+            PluginConfigSpec.numSetting("retry_max_backoff_millis", 10000);
+    public static final PluginConfigSpec<Double> RETRY_BACKOFF_MULTIPLIER_CONFIG =
+            PluginConfigSpec.floatSetting("retry_backoff_multiplier", 1.5);
+    public static final PluginConfigSpec<Long> RETRY_MAX_ATTEMPTS_CONFIG =
+            PluginConfigSpec.numSetting("retry_max_attempts", 5);
+    public static final PluginConfigSpec<Long> QUEUE_SIZE_CONFIG =
+            PluginConfigSpec.numSetting("queue_size", 2048);
     public static final PluginConfigSpec<Long> MAX_QUEUE_SIZE_CONFIG =
-            PluginConfigSpec.numSetting("max_queue_size", 2048);
+            PluginConfigSpec.numSetting("max_queue_size", 2048, true, false);
+    public static final PluginConfigSpec<Long> NUM_CONSUMERS_CONFIG =
+            PluginConfigSpec.numSetting("num_consumers", 1);
     public static final PluginConfigSpec<Long> MAX_BATCH_SIZE_CONFIG =
             PluginConfigSpec.numSetting("max_batch_size", 512);
     public static final PluginConfigSpec<Long> SCHEDULE_DELAY_CONFIG =
             PluginConfigSpec.numSetting("schedule_delay_millis", 1000);
-    public static final PluginConfigSpec<Long> EXPORT_TIMEOUT_CONFIG =
-            PluginConfigSpec.numSetting("export_timeout_millis", 30000);
 
     public static final PluginConfigSpec<Map<String, Object>>  ATTRIBUTES_CONFIG = PluginConfigSpec.hashSetting("attributes",null, false, false);
     public static final PluginConfigSpec<Map<String, Object>> RESOURCE_CONFIG = PluginConfigSpec.hashSetting("resource", null, false, false);
@@ -87,9 +99,11 @@ public class Otlp implements Output {
     private final Configuration configuration;
     private final CountDownLatch done = new CountDownLatch(1);
     private final AtomicBoolean shutdownStarted = new AtomicBoolean();
+    private final Object lifecycleLock = new Object();
     private volatile boolean stopped = false;
-    private final SdkLoggerProvider sdkLoggerProvider;
-    private final LogstashSdkMetrics sdkMetrics;
+    private volatile SdkLoggerProvider sdkLoggerProvider;
+    private Supplier<SdkLoggerProvider> providerFactory;
+    private volatile LogstashSdkMetrics sdkMetrics;
     private final AtomicLong emittedLogRecordSequence = new AtomicLong(0);
     private final org.apache.logging.log4j.Logger pluginLogger;
 
@@ -209,7 +223,7 @@ public class Otlp implements Output {
         return Instant.ofEpochMilli(eventTimestamp.toEpochMilli()).plusNanos(offsetNanos);
     }
 
-    private void emitLog(Event event) {
+    private void emitLog(Event event, SdkLoggerProvider provider) {
         io.opentelemetry.context.Context c = getContextForEvent(event);
         Instant eventTimestamp = event.getEventTimestamp();
         Instant adjustedTimestamp = timestampWithNanosecondDisambiguation(eventTimestamp);
@@ -217,7 +231,7 @@ public class Otlp implements Output {
         String severityText = extractFieldForEvent(event, configuration.get(SEVERITY_TEXT_CONFIG));
         Attributes attributes = getAttributesForEvent(event);
 
-        Logger logger = sdkLoggerProvider.get("logstash-output-otlp");
+        Logger logger = provider.get("logstash-output-otlp");
         logger.logRecordBuilder()
                 .setTimestamp(adjustedTimestamp)
                 .setObservedTimestamp(eventTimestamp)
@@ -250,17 +264,18 @@ public class Otlp implements Output {
         throw new IllegalArgumentException(String.format("endpoint_type (%s) is not valid", endpointType));
     }
 
-    private LogRecordExporter logExporterForConfig(Configuration configuration, LogstashSdkMetrics metrics) {
+    private Supplier<LogRecordExporter> exporterFactoryForConfig(Configuration configuration, LogstashSdkMetrics metrics,
+                                                                RetryPolicy retryPolicy) {
         URI endpoint = configuration.get(ENDPOINT_CONFIG);
         String compression = configuration.get(COMPRESSION_CONFIG);
         String caPath = configuration.get(SSL_CERTIFICATE_AUTHORITIES);
         boolean sslDisableTlsVerification = Boolean.TRUE.equals(configuration.get(SSL_DISABLE_TLS_VERIFICATION));
         SSLContext sslContext = sslDisableTlsVerification ? getInsecureSSLContext() : null;
 
-        Long connectTimeout = configuration.get(CONNECT_TIMEOUT);
-        Long timeout = configuration.get(TIMEOUT);
+        long connectTimeout = positiveSetting(CONNECT_TIMEOUT, Long.MAX_VALUE / 1_000_000_000);
+        long timeout = positiveSetting(TIMEOUT, Long.MAX_VALUE / 1_000_000_000);
 
-        byte[] caFile = caPath == null ? null :getSSLCertificateAuthority(caPath);
+        byte[] caFile = sslDisableTlsVerification || caPath == null ? null : getSSLCertificateAuthority(caPath);
 
         if(sslDisableTlsVerification) {
             pluginLogger.warn("ssl_disable_tls_verification is enabled. The OTLP exporter will trust any TLS certificate; use only for local testing.");
@@ -273,30 +288,32 @@ public class Otlp implements Output {
             OtlpHttpLogRecordExporterBuilder builder = OtlpHttpLogRecordExporter.builder();
 
             builder.setEndpoint(endpoint.toString())
-                    .setMeterProvider(metrics.meterProvider())
+                    .setComponentLoader(new PartialSuccessComponentLoader(metrics))
                     .setInternalTelemetryVersion(InternalTelemetryVersion.LATEST)
                     .setConnectTimeout(connectTimeout, TimeUnit.SECONDS)
                     .setTimeout(timeout, TimeUnit.SECONDS)
+                    .setRetryPolicy(retryPolicy)
                     .setCompression(compression);
 
             if(!sslDisableTlsVerification && caFile != null && caFile.length > 0)  builder.setTrustedCertificates(caFile);
             if(sslDisableTlsVerification) builder.setSslContext(sslContext, getInsecureSSLTrustManager());
 
-            return builder.build();
+            return () -> builder.setMeterProvider(metrics.meterProvider()).build();
         } else {
             OtlpGrpcLogRecordExporterBuilder builder = OtlpGrpcLogRecordExporter.builder();
 
             builder.setEndpoint(endpoint.toString())
-                    .setMeterProvider(metrics.meterProvider())
+                    .setComponentLoader(new PartialSuccessComponentLoader(metrics))
                     .setInternalTelemetryVersion(InternalTelemetryVersion.LATEST)
                     .setConnectTimeout(connectTimeout, TimeUnit.SECONDS)
                     .setTimeout(timeout, TimeUnit.SECONDS)
+                    .setRetryPolicy(retryPolicy)
                     .setCompression(compression);
 
             if(!sslDisableTlsVerification && caFile != null && caFile.length > 0)  builder.setTrustedCertificates(caFile);
             if(sslDisableTlsVerification) builder.setSslContext(sslContext, getInsecureSSLTrustManager());
 
-            return builder.build();
+            return () -> builder.setMeterProvider(metrics.meterProvider()).build();
         }
     }
 
@@ -324,71 +341,160 @@ public class Otlp implements Output {
 
     Otlp(final String id, final Configuration config, final Context context,
          LogRecordExporter delegate, boolean batchEnabled) {
-        this(id, config, context, null, !batchEnabled, Objects.requireNonNull(delegate));
+        this(id, config, context, null, !batchEnabled, () -> Objects.requireNonNull(delegate));
+    }
+
+    Otlp(final String id, final Configuration config, final Context context,
+         Supplier<LogRecordExporter> exporterFactory, boolean batchEnabled) {
+        this(id, config, context, null, !batchEnabled, Objects.requireNonNull(exporterFactory));
     }
 
     private Otlp(final String id, final Configuration config, final Context context,
-                 OutputStream targetStream, boolean testEnabled, LogRecordExporter suppliedExporter) {
-        // constructors should validate configuration options
+                 OutputStream targetStream, boolean testEnabled, Supplier<LogRecordExporter> suppliedExporterFactory) {
         this.id = id;
         this.configuration = config;
         this.pluginLogger = context == null ? LogManager.getLogger(Otlp.class) : context.getLogger(this);
 
-        int maxQueueSize = (int) positiveSetting(MAX_QUEUE_SIZE_CONFIG, Integer.MAX_VALUE);
+        int maxQueueSize = queueSize();
+        int numConsumers = (int) positiveSetting(NUM_CONSUMERS_CONFIG, 256);
         int maxBatchSize = (int) positiveSetting(MAX_BATCH_SIZE_CONFIG, Integer.MAX_VALUE);
         long scheduleDelay = positiveSetting(SCHEDULE_DELAY_CONFIG, Long.MAX_VALUE / 1_000_000);
-        long exportTimeout = positiveSetting(EXPORT_TIMEOUT_CONFIG, Long.MAX_VALUE / 1_000_000);
-        long requestTimeout = positiveSetting(TIMEOUT, Long.MAX_VALUE / 1_000_000_000);
+        positiveSetting(TIMEOUT, Long.MAX_VALUE / 1_000_000_000);
+        positiveSetting(CONNECT_TIMEOUT, Long.MAX_VALUE / 1_000_000_000);
+        RetryPolicy retryPolicy = retryPolicyForConfig();
         if (maxBatchSize > maxQueueSize) {
-            throw new IllegalArgumentException("max_batch_size must not exceed max_queue_size");
-        }
-        if (exportTimeout < TimeUnit.SECONDS.toMillis(requestTimeout)) {
-            throw new IllegalArgumentException("export_timeout_millis must be at least timeout * 1000");
+            throw new IllegalArgumentException("max_batch_size must not exceed queue_size");
         }
 
         Resource resource = Resource.create(getResourceAttributes());
-
-        LogRecordExporter exporter = null;
-        LogRecordProcessor processor = null;
-        LogstashSdkMetrics metrics = null;
+        sdkMetrics = testEnabled ? null : new LogstashSdkMetrics(pluginLogger, id, maxQueueSize,
+                context == null ? null : context.getMetric(this));
         try {
-            metrics = testEnabled ? null : new LogstashSdkMetrics(pluginLogger, id, maxQueueSize,
-                    context == null ? null : context.getMetric(this));
-            sdkMetrics = metrics;
-            exporter = suppliedExporter != null ? suppliedExporter
-                    : testEnabled ? new StreamLogRecordExporter(new PrintStream(targetStream), config.get(ENDPOINT_CONFIG))
-                    : logExporterForConfig(config, metrics);
-            exporter = new DiagnosticLogRecordExporter(exporter, pluginLogger, id, config.get(ENDPOINT_CONFIG));
-            processor = testEnabled ? SimpleLogRecordProcessor.create(exporter)
-                    : BatchLogRecordProcessor.builder(exporter)
-                            .setMeterProvider(metrics.meterProvider())
-                            .setInternalTelemetryVersion(InternalTelemetryVersion.LATEST)
-                            .setMaxQueueSize(maxQueueSize)
-                            .setMaxExportBatchSize(maxBatchSize)
-                            .setScheduleDelay(scheduleDelay, TimeUnit.MILLISECONDS)
-                            .setExporterTimeout(exportTimeout, TimeUnit.MILLISECONDS)
-                            .build();
-            sdkLoggerProvider = SdkLoggerProvider.builder()
-                    .setResource(resource)
-                    .addLogRecordProcessor(processor)
-                    .build();
+            Supplier<LogRecordExporter> exporterFactory = suppliedExporterFactory != null ? suppliedExporterFactory
+                    : testEnabled ? () -> new StreamLogRecordExporter(new PrintStream(targetStream), config.get(ENDPOINT_CONFIG))
+                    : exporterFactoryForConfig(config, sdkMetrics, retryPolicy);
+            providerFactory = () -> createProvider(exporterFactory, testEnabled, resource, numConsumers,
+                    maxQueueSize, maxBatchSize, scheduleDelay);
         } catch (RuntimeException | Error failure) {
-            if (metrics != null) metrics.close();
-            if (processor != null) {
-                processor.shutdown();
-            } else if (exporter != null) {
-                exporter.shutdown();
-            }
+            if (sdkMetrics != null) sdkMetrics.close();
             throw failure;
         }
     }
 
+    private SdkLoggerProvider createProvider(Supplier<LogRecordExporter> exporterFactory, boolean testEnabled,
+                                            Resource resource, int numConsumers, int maxQueueSize,
+                                            int maxBatchSize, long scheduleDelay) {
+        List<LogRecordExporter> exporters = new ArrayList<>();
+        boolean exportersTransferred = false;
+        LogRecordProcessor processor = null;
+        try {
+            DiagnosticLogRecordExporter.FailureLogLimiter limiter = new DiagnosticLogRecordExporter.FailureLogLimiter();
+            for (int consumer = 0; consumer < (testEnabled ? 1 : numConsumers); consumer++) {
+                LogRecordExporter exporter = exporterFactory.get();
+                exporters.add(new DiagnosticLogRecordExporter(exporter, pluginLogger, id, configuration.get(ENDPOINT_CONFIG), limiter));
+            }
+            if (testEnabled) {
+                processor = SimpleLogRecordProcessor.create(exporters.get(0));
+                exportersTransferred = true;
+            } else {
+                var meterProvider = sdkMetrics.meterProvider();
+                exportersTransferred = true;
+                processor = new SharedQueueLogRecordProcessor(id, exporters, maxQueueSize, maxBatchSize,
+                        scheduleDelay, meterProvider);
+            }
+            return SdkLoggerProvider.builder()
+                    .setResource(resource)
+                    .addLogRecordProcessor(processor)
+                    .build();
+        } catch (RuntimeException | Error failure) {
+            List<CompletableResultCode> shutdowns = new ArrayList<>();
+            if (processor != null) {
+                shutdowns.add(processor.shutdown());
+            } else if (!exportersTransferred) {
+                for (LogRecordExporter exporter : exporters) {
+                    try {
+                        shutdowns.add(exporter.shutdown());
+                    } catch (RuntimeException shutdownFailure) {
+                        failure.addSuppressed(shutdownFailure);
+                    }
+                }
+            }
+            CompletableResultCode.ofAll(shutdowns).whenComplete(this::finishShutdown);
+            throw failure;
+        }
+    }
+
+    private SdkLoggerProvider ensureStarted() {
+        SdkLoggerProvider current = sdkLoggerProvider;
+        if (current != null) return stopped ? null : current;
+        synchronized (lifecycleLock) {
+            if (stopped) return null;
+            if (sdkLoggerProvider == null) {
+                try {
+                    sdkLoggerProvider = providerFactory.get();
+                } catch (RuntimeException | Error failure) {
+                    stopped = true;
+                    shutdownStarted.set(true);
+                    throw failure;
+                } finally {
+                    providerFactory = null;
+                }
+            }
+            return sdkLoggerProvider;
+        }
+    }
+
+    private int queueSize() {
+        if (configuration.contains(MAX_QUEUE_SIZE_CONFIG)) {
+            if (configuration.contains(QUEUE_SIZE_CONFIG)) {
+                throw new IllegalArgumentException("Use queue_size or max_queue_size, not both");
+            }
+            int size = (int) positiveSetting(MAX_QUEUE_SIZE_CONFIG, Integer.MAX_VALUE);
+            pluginLogger.warn("max_queue_size is deprecated; use queue_size instead.");
+            return size;
+        }
+        return (int) positiveSetting(QUEUE_SIZE_CONFIG, Integer.MAX_VALUE);
+    }
+
     private long positiveSetting(PluginConfigSpec<Long> setting, long maximum) {
-        long value = configuration.get(setting);
+        Object raw = configuration.getRawValue(setting);
+        long value;
+        try {
+            value = raw instanceof String text ? Long.parseLong(text.trim()) : configuration.get(setting);
+        } catch (NumberFormatException invalidNumber) {
+            throw new IllegalArgumentException(setting.name() + " must be an integer", invalidNumber);
+        }
         if (value <= 0 || value > maximum) {
             throw new IllegalArgumentException(setting.name() + " must be between 1 and " + maximum);
         }
         return value;
+    }
+
+    RetryPolicy retryPolicyForConfig() {
+        long initialBackoff = positiveSetting(RETRY_INITIAL_BACKOFF_CONFIG, Long.MAX_VALUE / 1_000_000);
+        long maxBackoff = positiveSetting(RETRY_MAX_BACKOFF_CONFIG, Long.MAX_VALUE / 1_000_000);
+        long maxAttempts = positiveSetting(RETRY_MAX_ATTEMPTS_CONFIG, 5);
+        if (maxAttempts < 2) throw new IllegalArgumentException("retry_max_attempts must be between 2 and 5");
+        if (maxBackoff < initialBackoff) {
+            throw new IllegalArgumentException("retry_max_backoff_millis must be at least retry_initial_backoff_millis");
+        }
+        Object raw = configuration.getRawValue(RETRY_BACKOFF_MULTIPLIER_CONFIG);
+        double multiplier;
+        try {
+            multiplier = raw instanceof String text ? Double.parseDouble(text.trim())
+                    : configuration.get(RETRY_BACKOFF_MULTIPLIER_CONFIG);
+        } catch (NumberFormatException invalidNumber) {
+            throw new IllegalArgumentException("retry_backoff_multiplier must be a finite number of at least 1", invalidNumber);
+        }
+        if (!Double.isFinite(multiplier) || multiplier < 1) {
+            throw new IllegalArgumentException("retry_backoff_multiplier must be a finite number of at least 1");
+        }
+        return RetryPolicy.builder()
+                .setInitialBackoff(Duration.ofMillis(initialBackoff))
+                .setMaxBackoff(Duration.ofMillis(maxBackoff))
+                .setBackoffMultiplier(multiplier)
+                .setMaxAttempts((int) maxAttempts)
+                .build();
     }
 
     private SSLContext getInsecureSSLContext() {
@@ -423,18 +529,24 @@ public class Otlp implements Output {
 
     @Override
     public void output(final Collection<Event> events) {
+        if (events.isEmpty()) return;
+        SdkLoggerProvider provider = ensureStarted();
+        if (provider == null) return;
         Iterator<Event> z = events.iterator();
         while (z.hasNext() && !stopped) {
-            emitLog(z.next());
+            emitLog(z.next(), provider);
         }
     }
 
     @Override
     public void stop() {
-        stopped = true;
-        if (shutdownStarted.compareAndSet(false, true)) {
-            initiateShutdown();
+        boolean startShutdown;
+        synchronized (lifecycleLock) {
+            stopped = true;
+            providerFactory = null;
+            startShutdown = shutdownStarted.compareAndSet(false, true);
         }
+        if (startShutdown) initiateShutdown();
         boolean interrupted = false;
         while (true) {
             try {
@@ -448,6 +560,10 @@ public class Otlp implements Output {
     }
 
     private void initiateShutdown() {
+        if (sdkLoggerProvider == null) {
+            finishShutdown();
+            return;
+        }
         try {
             CompletableResultCode result = sdkLoggerProvider.shutdown();
             result.whenComplete(() -> {
@@ -469,8 +585,11 @@ public class Otlp implements Output {
     }
 
     private void finishShutdown() {
+        LogstashSdkMetrics metrics = sdkMetrics;
+        sdkMetrics = null;
+        sdkLoggerProvider = null;
         try {
-            if (sdkMetrics != null) sdkMetrics.close();
+            if (metrics != null) metrics.close();
         } finally {
             done.countDown();
         }
@@ -500,10 +619,15 @@ public class Otlp implements Output {
                 SSL_DISABLE_TLS_VERIFICATION,
                 CONNECT_TIMEOUT,
                 TIMEOUT,
+                RETRY_INITIAL_BACKOFF_CONFIG,
+                RETRY_MAX_BACKOFF_CONFIG,
+                RETRY_BACKOFF_MULTIPLIER_CONFIG,
+                RETRY_MAX_ATTEMPTS_CONFIG,
+                QUEUE_SIZE_CONFIG,
                 MAX_QUEUE_SIZE_CONFIG,
+                NUM_CONSUMERS_CONFIG,
                 MAX_BATCH_SIZE_CONFIG,
-                SCHEDULE_DELAY_CONFIG,
-                EXPORT_TIMEOUT_CONFIG
+                SCHEDULE_DELAY_CONFIG
         ));
     }
 

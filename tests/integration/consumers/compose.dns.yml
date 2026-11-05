@@ -1,0 +1,11 @@
+services:
+  collector:
+    networks:
+      default:
+        ipv4_address: ${COLLECTOR_IP:-172.30.99.10}
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.99.0/24

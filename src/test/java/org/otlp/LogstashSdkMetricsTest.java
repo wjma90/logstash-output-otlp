@@ -14,7 +14,6 @@ import io.opentelemetry.sdk.common.InternalTelemetryVersion;
 import io.opentelemetry.sdk.common.InstrumentationScopeInfo;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.data.LogRecordData;
-import io.opentelemetry.sdk.logs.export.BatchLogRecordProcessor;
 import io.opentelemetry.sdk.logs.export.LogRecordExporter;
 import io.opentelemetry.sdk.metrics.SdkMeterProvider;
 import io.opentelemetry.sdk.metrics.data.AggregationTemporality;
@@ -55,16 +54,68 @@ class LogstashSdkMetricsTest {
     private static final Attributes DROPPED = Attributes.of(AttributeKey.stringKey("error.type"), "queue_full");
 
     @Test
+    void validationOnlyInstancePublishesQueueStateWithoutStartingAReader() {
+        RecordingMetrics nativeMetrics = new RecordingMetrics();
+        try (LogCapture capture = new LogCapture();
+             LogstashSdkMetrics metrics = new LogstashSdkMetrics(capture.logger, "validation-only", 64, nativeMetrics)) {
+            assertTrue(metricWorkers("validation-only").isEmpty());
+            assertEquals(Set.of("sdk_metrics"), nativeMetrics.values.keySet());
+            assertEquals(0, nativeMetrics.metricValue("otel.sdk.processor.log.queue.size", ""));
+            assertEquals(64, nativeMetrics.metricValue("otel.sdk.processor.log.queue.capacity", ""));
+            assertEquals("shared_queue_log_processor/validation-only",
+                    nativeMetrics.point("otel.sdk.processor.log.queue.size", "").get("otel_component_name"));
+            assertEquals("{log_record}",
+                    nativeMetrics.point("otel.sdk.processor.log.queue.capacity", "").get("unit"));
+        }
+        assertTrue(metricWorkers("validation-only").isEmpty());
+    }
+
+    @Test
+    void closingBeforeFirstUseDoesNotStartResourcesAndPreventsLaterStartup() {
+        try (LogCapture capture = new LogCapture()) {
+            LogstashSdkMetrics metrics = new LogstashSdkMetrics(capture.logger, "never-started", 32, new RecordingMetrics());
+            metrics.close();
+            metrics.close();
+            assertThrows(IllegalStateException.class, metrics::meterProvider);
+            assertTrue(metricWorkers("never-started").isEmpty());
+        }
+    }
+
+    @Test
+    void concurrentFirstUseCreatesOneProviderAndOneReader() throws Exception {
+        try (LogCapture capture = new LogCapture();
+             LogstashSdkMetrics metrics = new LogstashSdkMetrics(capture.logger, "lazy-start", 32, new RecordingMetrics())) {
+            var callers = Executors.newFixedThreadPool(4);
+            Set<Thread> readers;
+            try {
+                List<Future<io.opentelemetry.api.metrics.MeterProvider>> calls = new ArrayList<>();
+                for (int index = 0; index < 20; index++) calls.add(callers.submit(metrics::meterProvider));
+                var expected = calls.get(0).get(2, SECONDS);
+                for (var call : calls) assertSame(expected, call.get(2, SECONDS));
+                readers = metricWorkers("lazy-start");
+                assertEquals(1, readers.size());
+            } finally {
+                callers.shutdownNow();
+                assertTrue(callers.awaitTermination(2, SECONDS));
+            }
+            metrics.close();
+            for (Thread reader : readers) {
+                reader.join(2000);
+                assertFalse(reader.isAlive());
+            }
+            assertThrows(IllegalStateException.class, metrics::meterProvider);
+        }
+    }
+
+    @Test
     void publishesQueueStateAndActualDropsAndDetectsDrainingWithoutNewEvents() throws Exception {
         RecordingMetrics nativeMetrics = new RecordingMetrics();
         try (LogCapture capture = new LogCapture();
              LogstashSdkMetrics metrics = new LogstashSdkMetrics(capture.logger, "queue-test", 2, nativeMetrics)) {
             BlockingExporter exporter = new BlockingExporter();
             SdkLoggerProvider provider = SdkLoggerProvider.builder()
-                    .addLogRecordProcessor(BatchLogRecordProcessor.builder(exporter)
-                            .setMeterProvider(metrics.meterProvider())
-                            .setInternalTelemetryVersion(InternalTelemetryVersion.LATEST)
-                            .setMaxQueueSize(2).setMaxExportBatchSize(1).build())
+                    .addLogRecordProcessor(new SharedQueueLogRecordProcessor("queue-test", List.of(exporter),
+                            2, 1, 1000, metrics.meterProvider()))
                     .build();
             try {
                 var logger = provider.get("queue-test");
@@ -86,7 +137,7 @@ class LogstashSdkMetricsTest {
                 assertEquals(1L, nativeMetrics.point("otel.sdk.processor.log.processed", "queue_full").get("value"));
                 assertEquals(1, capture.events.size());
                 assertEquals(Level.WARN, capture.events.get(0).getLevel());
-                assertEquals("OTLP export queue full: output_id=queue-test max_queue_size=2 dropped_records=1 total_dropped_records=1",
+                assertEquals("OTLP export queue full: output_id=queue-test queue_size=2 dropped_records=1 total_dropped_records=1",
                         capture.message(0));
 
                 exporter.pending.succeed();
@@ -131,10 +182,8 @@ class LogstashSdkMetricsTest {
                     .setInternalTelemetryVersion(InternalTelemetryVersion.LATEST)
                     .setTimeout(3, SECONDS).build();
             SdkLoggerProvider provider = SdkLoggerProvider.builder()
-                    .addLogRecordProcessor(BatchLogRecordProcessor.builder(exporter)
-                            .setMeterProvider(metrics.meterProvider())
-                            .setInternalTelemetryVersion(InternalTelemetryVersion.LATEST)
-                            .setMaxExportBatchSize(1).build()).build();
+                    .addLogRecordProcessor(new SharedQueueLogRecordProcessor("http-test", List.of(exporter),
+                            32, 1, 1000, metrics.meterProvider())).build();
             try {
                 var logger = provider.get("http-test");
                 logger.logRecordBuilder().setBody("successful export").emit();
@@ -153,7 +202,7 @@ class LogstashSdkMetricsTest {
 
                 status.set(400);
                 logger.logRecordBuilder().setBody("failed export").emit();
-                assertTrue(provider.forceFlush().join(3, SECONDS).isSuccess());
+                assertTrue(provider.forceFlush().join(3, SECONDS).isDone());
                 collect(metrics);
                 assertEquals(1L, nativeMetrics.point("otel.sdk.exporter.log.exported", "400").get("value"));
                 assertEquals(1L, nativeMetrics.point("otel.sdk.exporter.log.exported", "").get("value"));
@@ -228,6 +277,60 @@ class LogstashSdkMetricsTest {
     }
 
     @Test
+    void partialSuccessCountsEveryRejectionAndLimitsWarningsWithoutKeepingMessages() {
+        AtomicLong clock = new AtomicLong();
+        RecordingMetrics nativeMetrics = new RecordingMetrics();
+        try (LogCapture capture = new LogCapture();
+             LogstashSdkMetrics metrics = new LogstashSdkMetrics(capture.logger, "partial-test", 32,
+                     nativeMetrics, clock::get)) {
+            metrics.recordPartialSuccess(2, "bad\nrecord\r\t" + "x".repeat(2000));
+            clock.set(SECONDS.toNanos(29));
+            metrics.recordPartialSuccess(3, "another rejection");
+            metrics.export(List.of());
+
+            assertEquals(5, nativeMetrics.metricValue("otlp.exporter.log.rejected", "partial_success"));
+            assertEquals(1, capture.events.size());
+            assertFalse(capture.message(0).contains("\n"));
+            assertFalse(capture.message(0).contains("\r"));
+            assertFalse(capture.message(0).contains("\t"));
+            assertTrue(capture.message(0).length() < 1250);
+
+            clock.set(SECONDS.toNanos(30));
+            metrics.recordPartialSuccess(1, "invalid field");
+            metrics.export(List.of());
+            assertEquals(2, capture.events.size());
+            assertTrue(capture.message(1).contains("total_rejected_records=6 suppressed_responses=1"));
+            assertEquals(6, nativeMetrics.metricValue("otlp.exporter.log.rejected", "partial_success"));
+
+            metrics.close();
+            clock.set(SECONDS.toNanos(60));
+            metrics.recordPartialSuccess(100, "late callback");
+            metrics.recordInvalidResponse();
+            metrics.export(List.of());
+            assertEquals(2, capture.events.size());
+            assertEquals(6, nativeMetrics.metricValue("otlp.exporter.log.rejected", "partial_success"));
+            assertTrue(metricWorkers("partial-test").isEmpty());
+        }
+    }
+
+    @Test
+    void partialSuccessCounterCannotOverflowAndInvalidResponseWarningsAreLimited() {
+        RecordingMetrics nativeMetrics = new RecordingMetrics();
+        try (LogCapture capture = new LogCapture();
+             LogstashSdkMetrics metrics = new LogstashSdkMetrics(capture.logger, "invalid-response", 32, nativeMetrics)) {
+            metrics.recordPartialSuccess(Long.MAX_VALUE, "rejected");
+            metrics.recordPartialSuccess(1, "rejected");
+            metrics.recordInvalidResponse();
+            metrics.recordInvalidResponse();
+            metrics.export(List.of());
+
+            assertEquals(Long.MAX_VALUE, nativeMetrics.metricValue("otlp.exporter.log.rejected", "partial_success"));
+            assertEquals(2, capture.events.size());
+            assertTrue(capture.message(1).startsWith("OTLP response diagnostics failed:"));
+        }
+    }
+
+    @Test
     void concurrentChecksDoNotDuplicateWarnings() throws Exception {
         RecordingMetrics nativeMetrics = new RecordingMetrics();
         try (LogCapture capture = new LogCapture();
@@ -258,10 +361,10 @@ class LogstashSdkMetricsTest {
         RecordingMetrics nativeMetrics = new RecordingMetrics();
         try (LogCapture capture = new LogCapture();
              LogstashSdkMetrics metrics = new LogstashSdkMetrics(capture.logger, "close-test", 32, nativeMetrics, clock::get)) {
+            LongCounter counter = counter(metrics);
             Thread worker = Thread.getAllStackTraces().keySet().stream()
                     .filter(thread -> thread.getName().equals("otlp-sdk-metrics-close-test"))
                     .findFirst().orElseThrow();
-            LongCounter counter = counter(metrics);
             counter.add(1, DROPPED);
             collect(metrics);
             metrics.close();
@@ -277,6 +380,12 @@ class LogstashSdkMetricsTest {
 
     private static LongCounter counter(LogstashSdkMetrics metrics) {
         return metrics.meterProvider().get("io.opentelemetry.sdk.logs").counterBuilder("otel.sdk.processor.log.processed").build();
+    }
+
+    private static Set<Thread> metricWorkers(String outputId) {
+        return Thread.getAllStackTraces().keySet().stream()
+                .filter(thread -> thread.isAlive() && thread.getName().equals("otlp-sdk-metrics-" + outputId))
+                .collect(java.util.stream.Collectors.toSet());
     }
 
     private static void collect(LogstashSdkMetrics metrics) {

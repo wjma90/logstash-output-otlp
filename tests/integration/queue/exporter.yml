@@ -1,6 +1,16 @@
 modules:
   logstash:
     metrics:
+      - name: otlp_exporter_log
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="queue_test")].sdk_metrics.otlp_exporter_log_rejected.*}'
+        valuetype: counter
+        labels:
+          pipeline: main
+          plugin_id: queue_test
+          error_type: '{.error_type}'
+        values:
+          rejected_total: '{.value}'
       - name: otel_sdk_processor_log_queue
         type: object
         path: '{.pipelines.main.plugins.outputs[?(@.id=="queue_test")].sdk_metrics.otel_sdk_processor_log_queue_size.*}'

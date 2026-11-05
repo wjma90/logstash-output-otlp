@@ -35,9 +35,13 @@ final class LogstashSdkMetrics implements MetricExporter {
     private final int capacity;
     private final NamespacedMetric metrics;
     private final LongSupplier nanoTime;
-    private final SdkMeterProvider meterProvider;
+    private SdkMeterProvider meterProvider;
     private Long lastWarning;
     private long reportedDrops;
+    private long rejectedRecords;
+    private long suppressedPartialResponses;
+    private Long lastPartialWarning;
+    private Long lastInvalidResponseWarning;
     private boolean closed;
 
     LogstashSdkMetrics(Logger logger, String outputId, int capacity, NamespacedMetric metrics) {
@@ -51,8 +55,16 @@ final class LogstashSdkMetrics implements MetricExporter {
         this.metrics = metrics;
         this.nanoTime = nanoTime;
         if (metrics != null) {
-            metrics.gauge("sdk_metrics", Map.of());
+            metrics.gauge("sdk_metrics", Map.of(
+                    "otel_sdk_processor_log_queue_size", Map.of("0", initialQueuePoint(0)),
+                    "otel_sdk_processor_log_queue_capacity", Map.of("0", initialQueuePoint(capacity)),
+                    "otlp_exporter_log_rejected", rejectedPoint()));
         }
+    }
+
+    synchronized MeterProvider meterProvider() {
+        if (closed) throw new IllegalStateException("OTLP SDK metrics are closed");
+        if (meterProvider != null) return meterProvider;
         var executor = Executors.newSingleThreadScheduledExecutor(action -> {
             Thread thread = new Thread(action, "otlp-sdk-metrics-" + outputId);
             thread.setDaemon(true);
@@ -66,9 +78,6 @@ final class LogstashSdkMetrics implements MetricExporter {
             reader.shutdown();
             throw failure;
         }
-    }
-
-    MeterProvider meterProvider() {
         return meterProvider;
     }
 
@@ -76,11 +85,11 @@ final class LogstashSdkMetrics implements MetricExporter {
     public synchronized CompletableResultCode export(Collection<MetricData> data) {
         if (closed) return CompletableResultCode.ofSuccess();
         long total = 0;
-        Map<String, Object> snapshot = new LinkedHashMap<>();
+        Map<String, Map<String, Object>> snapshot = new LinkedHashMap<>();
         for (MetricData metric : data) {
             if (!SDK_METRICS.contains(metric.getName())) continue;
-            Map<String, Object> points = new LinkedHashMap<>();
-            snapshot.put(metric.getName().replace('.', '_'), points);
+            Map<String, Object> points = snapshot.computeIfAbsent(
+                    metric.getName().replace('.', '_'), key -> new LinkedHashMap<>());
             if (metric.getName().equals("otel.sdk.exporter.operation.duration")) {
                 metric.getHistogramData().getPoints().forEach(point -> {
                     Map<String, Object> value = pointAttributes(point, metric.getUnit());
@@ -102,15 +111,46 @@ final class LogstashSdkMetrics implements MetricExporter {
                 }
             }
         }
+        snapshot.put("otlp_exporter_log_rejected", rejectedPoint());
         if (metrics != null) metrics.gauge("sdk_metrics", snapshot);
         long now = nanoTime.getAsLong();
         if (total > reportedDrops && (lastWarning == null || now - lastWarning >= WARNING_INTERVAL_NANOS)) {
-            logger.warn("OTLP export queue full: output_id={} max_queue_size={} dropped_records={} total_dropped_records={}",
+            logger.warn("OTLP export queue full: output_id={} queue_size={} dropped_records={} total_dropped_records={}",
                     outputId, capacity, total - reportedDrops, total);
             reportedDrops = total;
             lastWarning = now;
         }
         return CompletableResultCode.ofSuccess();
+    }
+
+    synchronized void recordPartialSuccess(long rejected, String message) {
+        if (closed || (rejected == 0 && message.isEmpty())) return;
+        rejectedRecords = rejected > Long.MAX_VALUE - rejectedRecords ? Long.MAX_VALUE : rejectedRecords + rejected;
+        long now = nanoTime.getAsLong();
+        if (lastPartialWarning == null || now - lastPartialWarning >= WARNING_INTERVAL_NANOS) {
+            String reason = message.substring(0, Math.min(message.length(), 1024))
+                    .replace('\n', ' ').replace('\r', ' ').replace('\t', ' ');
+            logger.warn("OTLP partial success: output_id={} rejected_records={} total_rejected_records={} suppressed_responses={} error_message={}",
+                    outputId, rejected, rejectedRecords, suppressedPartialResponses, reason);
+            lastPartialWarning = now;
+            suppressedPartialResponses = 0;
+        } else {
+            suppressedPartialResponses++;
+        }
+    }
+
+    synchronized void recordInvalidResponse() {
+        if (closed) return;
+        long now = nanoTime.getAsLong();
+        if (lastInvalidResponseWarning == null || now - lastInvalidResponseWarning >= WARNING_INTERVAL_NANOS) {
+            logger.warn("OTLP response diagnostics failed: output_id={} reason=invalid_response partial_success could not be read",
+                    outputId);
+            lastInvalidResponseWarning = now;
+        }
+    }
+
+    private Map<String, Object> rejectedPoint() {
+        return Map.of("0", Map.of("unit", "{log_record}", "error_type", "partial_success", "value", rejectedRecords));
     }
 
     @Override
@@ -131,7 +171,20 @@ final class LogstashSdkMetrics implements MetricExporter {
 
     @Override
     public void close() {
-        meterProvider.close();
+        SdkMeterProvider provider;
+        synchronized (this) {
+            closed = true;
+            provider = meterProvider;
+            meterProvider = null;
+        }
+        if (provider != null) provider.close();
+    }
+
+    private Map<String, Object> initialQueuePoint(long value) {
+        return Map.of("unit", "{log_record}", "error_type", "",
+                "otel_component_type", "shared_queue_log_processor",
+                "otel_component_name", "shared_queue_log_processor/" + outputId,
+                "value", value);
     }
 
     private static Map<String, Object> pointAttributes(PointData point, String unit) {

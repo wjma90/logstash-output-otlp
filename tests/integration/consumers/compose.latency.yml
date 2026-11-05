@@ -1,0 +1,17 @@
+services:
+  logstash:
+    environment:
+      OTLP_PROTOCOL: grpc
+      OTLP_ENDPOINT: http://toxiproxy:4317
+    depends_on:
+      - toxiproxy
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.13.0
+    command: ["-host=0.0.0.0", "-config=/config.json"]
+    ports:
+      - "127.0.0.1:18474:8474"
+    volumes:
+      - ./toxiproxy.json:/config.json:ro
+    depends_on:
+      - collector

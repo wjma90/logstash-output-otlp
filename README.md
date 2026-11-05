@@ -104,16 +104,20 @@ output {
 | compression                  | [string](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string), one of ["gzip", "none"] | No |
 | connect_timeout              | [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)                            | No |
 | timeout                      | [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)   | No |
-| max_queue_size               | long | No |
+| retry_initial_backoff_millis | long | No |
+| retry_max_backoff_millis     | long | No |
+| retry_backoff_multiplier     | float | No |
+| retry_max_attempts           | long | No |
+| queue_size                   | long | No |
+| num_consumers                | long | No |
 | max_batch_size               | long | No |
 | schedule_delay_millis        | long | No |
-| export_timeout_millis        | long | No |
 | ssl_disable_tls_verification | [boolean](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)                         | No |
 | ssl_certificate_authorities  | [string](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#string)                          | No |
 | resource                     | [Hash](https://www.elastic.co/guide/en/logstash/latest/configuration-file-structure.html#hash)                            | No |
 | attributes                   | [Hash](https://www.elastic.co/guide/en/logstash/latest/configuration-file-structure.html#hash)                            | No |
 | body                         | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
-| name                         | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
+| name                         | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No; accepted but currently unused |
 | severity_text                | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
 | trace_id                     | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
 | span_id                      | [Field Reference](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#field-reference)        | No |
@@ -140,30 +144,57 @@ An endpoint that supports otlp to which logs are sent.
 
 - Value type is [long](https://www.elastic.co/guide/en/logstash/8.12/configuration-file-structure.html#number)
 - Default is: `10` (seconds)
-- Must be positive and no greater than `export_timeout_millis / 1000`.
+- Must be positive. Each consumer waits for the SDK export result before taking another batch.
 
 Batch settings:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `max_queue_size` | `2048` | Maximum records waiting in memory. |
-| `max_batch_size` | `512` | Maximum records in one export. |
-| `schedule_delay_millis` | `1000` | Interval for exporting an incomplete batch; a full batch can send earlier. |
-| `export_timeout_millis` | `30000` | Maximum wait for an export result in the batch processor. |
+| `queue_size` | `2048` | Maximum log records waiting in one shared memory queue. |
+| `num_consumers` | `1` | Consumers exporting batches concurrently to the same endpoint (1–256). |
+| `max_batch_size` | `512` | Maximum records per consumer batch. |
+| `schedule_delay_millis` | `1000` | Maximum wait to fill a batch after its first record is taken; full batches send immediately. |
 
 All four values must be positive integers, and `max_batch_size` must not exceed
-`max_queue_size`. Invalid or overflowing values fail at startup.
+`queue_size`. Invalid or overflowing values fail at startup. Queue capacity is
+shared by all consumers and always counts individual log records. Batches being
+formed or exported are outside the queue; allow memory for up to
+`queue_size + num_consumers * max_batch_size` records plus transport buffers.
 
-The OTLP SDK retries transient failures with exponential backoff and jitter,
-up to five attempts including the original request. The initial delay is about
-one second, multiplied by 1.5, with a nominal five-second backoff cap. The request
-`timeout` can end retries earlier; five attempts are not guaranteed. See the
-[SDK retry policy](https://github.com/open-telemetry/opentelemetry-java/blob/v1.62.0/sdk/common/src/main/java/io/opentelemetry/sdk/common/export/RetryPolicy.java).
+Consumers wait without polling when there is no work. Each consumer has its own
+SDK exporter and waits for completion before starting its next batch. Batches may
+arrive out of order. Shutdown stops admission, drains accepted records and closes
+all exporters and metric callbacks. The batch delay does not bound time spent
+waiting in the queue while all consumers are busy.
 
-Keep `export_timeout_millis` above the request timeout with some margin; the
-processor's wait does not cancel the network request. The queue is bounded and
-in memory: excess events are dropped when it fills, and batches that exhaust
+Exporters and worker threads start on the first non-empty output batch. Instances
+created only for Logstash configuration validation do not start background work.
+Queue capacity and an initial size of zero are visible before the first event.
+
+`max_queue_size` remains a deprecated alias for `queue_size`; configure only one.
+Remove `export_timeout_millis` from existing configurations: it is no longer
+supported. Network limits remain `connect_timeout` and `timeout`, in seconds.
+
+The HTTP and gRPC exporters use the SDK's exponential backoff for transient failures:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `retry_initial_backoff_millis` | `1000` | Initial retry delay in milliseconds. |
+| `retry_max_backoff_millis` | `10000` | Maximum nominal retry delay in milliseconds, before jitter. |
+| `retry_backoff_multiplier` | `1.5` | Multiplies the nominal delay after each retry; must be finite and at least 1. |
+| `retry_max_attempts` | `5` | Total attempts per batch, including the original request; the SDK supports 2–5. |
+
+Delays must be positive and the maximum must be at least the initial delay.
+The SDK applies ±20% jitter after the nominal cap: `10000` ms can produce a
+calculated delay of up to `12000` ms. Allow for this when choosing the cap.
+Each consumer retries its own batch; `timeout` includes retries and may end the
+export before all attempts finish. See the [SDK retry behavior](https://github.com/open-telemetry/opentelemetry-java/blob/v1.62.0/exporters/sender/okhttp/src/main/java/io/opentelemetry/exporter/sender/okhttp/internal/RetryInterceptor.java).
+
+The queue is bounded and in memory: excess events are dropped when it fills, and batches that exhaust
 their retries are not requeued. This does not guarantee delivery during an outage.
+
+See [the consumer integration test](tests/integration/consumers/README.md) to compare consumers,
+queue drops, CPU, heap and thread counts with Logstash.
 
 `protocol`
 
@@ -259,12 +290,29 @@ make logstashcorejar
 
 ## Monitoring
 
-The output exposes the Java SDK's `LATEST` log processor and exporter metrics
-under `sdk_metrics` in Logstash's Node Stats API, preserving component,
-endpoint and error attributes. The [metrics demo](tests/integration/queue/README.md)
+The output exposes the Java SDK's `LATEST` exporter metrics and the shared
+queue's `otel.sdk.processor.log.*` metrics under `sdk_metrics` in Logstash's
+Node Stats API, preserving component, endpoint and error attributes. The processor
+component type is `shared_queue_log_processor`. Exporter series are per consumer;
+sum them to get output totals. The [metrics demo](tests/integration/queue/README.md)
 shows successful exports, failures and queue saturation in Prometheus.
 `kuskoman/logstash-exporter` v1.9.2 needs additional collector support for these
 custom fields; the demo uses JSON Exporter mappings.
+
+For OTLP `partial_success` responses over HTTP or gRPC, the plugin emits a `WARN`
+with the output ID, rejected count and receiver's message, limited to once every
+30 seconds per output. It counts every rejection in
+`sdk_metrics.otlp_exporter_log_rejected`, summed across consumers. This custom
+counter appears in the demos as
+`otlp_exporter_log_rejected_total{error_type="partial_success"}` in Prometheus;
+it resets when the output is recreated. A warning with zero rejected records
+does not increase the counter. The receiver's message is bounded and is not a metric label.
+
+Partial batches are not retried, as required by [OTLP](https://opentelemetry.io/docs/specs/otlp/#partial-success).
+SDK 1.62.0 still counts the whole batch as successful in `otel.sdk.exporter.log.exported`;
+the rejection counter makes those losses visible without changing that SDK metric.
+Malformed responses produce a separate diagnostic `WARN` without inventing a rejected count.
+Run `./gradlew test --tests 'org.otlp.*PartialSuccess*'` to test these cases.
 
 ## Running locally
 
@@ -297,7 +345,7 @@ RUN logstash-plugin install logstash-output-otlp
 ### Integration tests
 
 See [tests/integration](tests/integration/README.md) for manual tests of export
-error logging, queue metrics in Prometheus and the timestamp fix for Loki.
+errors, queue metrics, consumer stress and the timestamp fix for Loki.
 
 ## Notes
 
