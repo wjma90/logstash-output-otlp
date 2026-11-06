@@ -1,0 +1,23 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        tls:
+          cert_file: /certs/collector.crt
+          key_file: /certs/collector.key
+      http:
+        endpoint: 0.0.0.0:4318
+        tls:
+          cert_file: /certs/collector.crt
+          key_file: /certs/collector.key
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [debug]

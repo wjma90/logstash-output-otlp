@@ -152,15 +152,23 @@ Batch settings:
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `queue_size` | `2048` | Maximum log records waiting in one shared memory queue. |
+| `block_on_overflow` | `false` | Wait for queue space instead of immediately dropping records when full. |
 | `num_consumers` | `1` | Consumers exporting batches concurrently to the same endpoint (1–256). |
 | `max_batch_size` | `512` | Maximum records per consumer batch. |
 | `schedule_delay_millis` | `1000` | Maximum wait to fill a batch after its first record is taken; full batches send immediately. |
 
-All four values must be positive integers, and `max_batch_size` must not exceed
+The four numeric settings must be positive integers, and `max_batch_size` must not exceed
 `queue_size`. Invalid or overflowing values fail at startup. Queue capacity is
 shared by all consumers and always counts individual log records. Batches being
 formed or exported are outside the queue; allow memory for up to
 `queue_size + num_consumers * max_batch_size` records plus transport buffers.
+
+With `block_on_overflow => true`, Logstash output workers wait until space is
+available, slowing the pipeline. There is no enqueue timeout or extra retry loop;
+`timeout` and `retry_*` still apply only to export requests. Shutdown or thread
+interruption releases the wait. Pending Logstash batches remain outside this
+queue's capacity. This can absorb temporary congestion but does not guarantee
+delivery after an export failure or process crash.
 
 Consumers wait without polling when there is no work. Each consumer has its own
 SDK exporter and waits for completion before starting its next batch. Batches may
@@ -302,6 +310,32 @@ shows successful exports, failures and queue saturation in Prometheus.
 `kuskoman/logstash-exporter` v1.9.2 needs additional collector support for these
 custom fields; the demo uses JSON Exporter mappings.
 
+The [backpressure demo](tests/integration/backpressure/README.md) compares both
+overflow modes under load. It also exposes three plugin-specific metrics:
+
+| Prometheus metric | Meaning |
+| --- | --- |
+| `otlp_processor_log_queue_peak_size` | Highest number of waiting records since this output instance started. |
+| `otlp_processor_log_queue_blocked_producers` | Output workers currently waiting for queue space. |
+| `otlp_processor_log_queue_blocked_duration_seconds_total` | Cumulative time across workers, recorded when each wait ends. |
+
+The peak is updated on every enqueue and remains after the queue drains or metrics
+are collected. It resets only when the output instance is recreated. It is a
+gauge, excludes records being batched or exported, and does not show when a peak
+occurred or how long it lasted. It needs no additional thread or sample history.
+
+These appear in `sdk_metrics` as `otlp_processor_log_queue_peak_size`,
+`otlp_processor_log_queue_blocked_producers` and
+`otlp_processor_log_queue_blocked_duration`. They are custom metrics, not
+OpenTelemetry semantic conventions. A successful wait does not increment
+`processed_total{error_type="queue_full"}` or emit the queue-full WARN. A wait
+cancelled by shutdown or interruption increments `processed_total` with
+`error_type="shutdown"` or `"interrupted"` instead.
+With 60-second scrapes, current-state gauges can miss short peaks; the retained
+peak still shows the highest occupancy. Use counter increases or
+`rate(...[5m])` to observe completed waits and drops between scrapes. Wait duration
+sums across workers and can exceed elapsed wall time.
+
 For OTLP `partial_success` responses over HTTP or gRPC, the plugin emits a `WARN`
 with the output ID, rejected count and receiver's message, limited to once every
 30 seconds per output. It counts every rejection in
@@ -349,6 +383,8 @@ RUN logstash-plugin install logstash-output-otlp
 
 See [tests/integration](tests/integration/README.md) for manual tests of export
 errors, queue metrics, consumer comparisons and the timestamp fix for Loki.
+The [TLS test](tests/integration/tls/README.md) checks HTTP and gRPC with a trusted
+CA, certificate rejection and optional verification bypass.
 The [regression load test](tests/integration/regression-load/README.md) combines
 sustained load, Loki timestamp checks and recovery after an export outage.
 

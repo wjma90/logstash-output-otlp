@@ -74,6 +74,8 @@ public class Otlp implements Output {
             PluginConfigSpec.numSetting("retry_max_attempts", 5);
     public static final PluginConfigSpec<Long> QUEUE_SIZE_CONFIG =
             PluginConfigSpec.numSetting("queue_size", 2048);
+    public static final PluginConfigSpec<Boolean> BLOCK_ON_OVERFLOW_CONFIG =
+            PluginConfigSpec.booleanSetting("block_on_overflow", false);
     public static final PluginConfigSpec<Long> MAX_QUEUE_SIZE_CONFIG =
             PluginConfigSpec.numSetting("max_queue_size", 2048, true, false);
     public static final PluginConfigSpec<Long> NUM_CONSUMERS_CONFIG =
@@ -99,6 +101,7 @@ public class Otlp implements Output {
     private enum VALID_PROTOCOL_OPTIONS {grpc, http}
     private final String id;
     private final Configuration configuration;
+    private final boolean blockOnOverflow;
     private final CountDownLatch done = new CountDownLatch(1);
     private final AtomicBoolean shutdownStarted = new AtomicBoolean();
     private final Object lifecycleLock = new Object();
@@ -355,6 +358,7 @@ public class Otlp implements Output {
                  OutputStream targetStream, boolean testEnabled, Supplier<LogRecordExporter> suppliedExporterFactory) {
         this.id = id;
         this.configuration = config;
+        this.blockOnOverflow = config.get(BLOCK_ON_OVERFLOW_CONFIG);
         this.pluginLogger = context == null ? LogManager.getLogger(Otlp.class) : context.getLogger(this);
 
         int maxQueueSize = queueSize();
@@ -405,7 +409,7 @@ public class Otlp implements Output {
                 var meterProvider = sdkMetrics.meterProvider();
                 exportersTransferred = true;
                 processor = new SharedQueueLogRecordProcessor(id, exporters, maxQueueSize, maxBatchSize,
-                        scheduleDelay, meterProvider);
+                        scheduleDelay, blockOnOverflow, meterProvider);
             }
             return SdkLoggerProvider.builder()
                     .setResource(resource)
@@ -629,6 +633,7 @@ public class Otlp implements Output {
                 RETRY_BACKOFF_MULTIPLIER_CONFIG,
                 RETRY_MAX_ATTEMPTS_CONFIG,
                 QUEUE_SIZE_CONFIG,
+                BLOCK_ON_OVERFLOW_CONFIG,
                 MAX_QUEUE_SIZE_CONFIG,
                 NUM_CONSUMERS_CONFIG,
                 MAX_BATCH_SIZE_CONFIG,

@@ -8,7 +8,9 @@ import io.opentelemetry.sdk.metrics.InstrumentType;
 import io.opentelemetry.sdk.metrics.SdkMeterProvider;
 import io.opentelemetry.sdk.metrics.data.AggregationTemporality;
 import io.opentelemetry.sdk.metrics.data.LongPointData;
+import io.opentelemetry.sdk.metrics.data.DoublePointData;
 import io.opentelemetry.sdk.metrics.data.MetricData;
+import io.opentelemetry.sdk.metrics.data.MetricDataType;
 import io.opentelemetry.sdk.metrics.data.PointData;
 import io.opentelemetry.sdk.metrics.export.MetricExporter;
 import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
@@ -29,7 +31,9 @@ final class LogstashSdkMetrics implements MetricExporter {
     private static final String PROCESSED = "otel.sdk.processor.log.processed";
     private static final Set<String> SDK_METRICS = Set.of(QUEUE_SIZE, PROCESSED,
             "otel.sdk.processor.log.queue.capacity", "otel.sdk.exporter.log.inflight",
-            "otel.sdk.exporter.log.exported", "otel.sdk.exporter.operation.duration");
+            "otel.sdk.exporter.log.exported", "otel.sdk.exporter.operation.duration",
+            "otlp.processor.log.queue.blocked.producers", "otlp.processor.log.queue.blocked.duration",
+            "otlp.processor.log.queue.peak.size");
     private final Logger logger;
     private final String outputId;
     private final int capacity;
@@ -58,6 +62,9 @@ final class LogstashSdkMetrics implements MetricExporter {
             metrics.gauge("sdk_metrics", Map.of(
                     "otel_sdk_processor_log_queue_size", Map.of("0", initialQueuePoint(0)),
                     "otel_sdk_processor_log_queue_capacity", Map.of("0", initialQueuePoint(capacity)),
+                    "otlp_processor_log_queue_peak_size", Map.of("0", initialQueuePoint(0)),
+                    "otlp_processor_log_queue_blocked_producers", Map.of("0", initialPoint(0, "{thread}")),
+                    "otlp_processor_log_queue_blocked_duration", Map.of("0", initialPoint(0, "s")),
                     "otlp_exporter_log_rejected", rejectedPoint()));
         }
     }
@@ -101,7 +108,14 @@ final class LogstashSdkMetrics implements MetricExporter {
                 });
                 continue;
             }
-            for (LongPointData point : metric.getLongSumData().getPoints()) {
+            for (DoublePointData point : metric.getDoubleSumData().getPoints()) {
+                Map<String, Object> value = pointAttributes(point, metric.getUnit());
+                value.put("value", point.getValue());
+                points.put(Integer.toString(points.size()), value);
+            }
+            Collection<LongPointData> longPoints = metric.getType() == MetricDataType.LONG_GAUGE
+                    ? metric.getLongGaugeData().getPoints() : metric.getLongSumData().getPoints();
+            for (LongPointData point : longPoints) {
                 Map<String, Object> value = pointAttributes(point, metric.getUnit());
                 value.put("value", point.getValue());
                 points.put(Integer.toString(points.size()), value);
@@ -181,7 +195,11 @@ final class LogstashSdkMetrics implements MetricExporter {
     }
 
     private Map<String, Object> initialQueuePoint(long value) {
-        return Map.of("unit", "{log_record}", "error_type", "",
+        return initialPoint(value, "{log_record}");
+    }
+
+    private Map<String, Object> initialPoint(long value, String unit) {
+        return Map.of("unit", unit, "error_type", "",
                 "otel_component_type", "shared_queue_log_processor",
                 "otel_component_name", "shared_queue_log_processor/" + outputId,
                 "value", value);

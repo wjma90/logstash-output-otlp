@@ -9,6 +9,7 @@ import io.opentelemetry.sdk.logs.export.LogRecordExporter;
 import io.opentelemetry.sdk.metrics.InstrumentType;
 import io.opentelemetry.sdk.metrics.SdkMeterProvider;
 import io.opentelemetry.sdk.metrics.data.AggregationTemporality;
+import io.opentelemetry.sdk.metrics.data.MetricDataType;
 import io.opentelemetry.sdk.metrics.export.CollectionRegistration;
 import io.opentelemetry.sdk.metrics.export.MetricReader;
 import org.junit.jupiter.api.AfterEach;
@@ -24,10 +25,12 @@ import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -39,6 +42,8 @@ import static org.junit.jupiter.api.Assertions.*;
 class SharedQueueLogRecordProcessorTest {
     private final List<StubExporter> exporters = new ArrayList<>();
     private final List<Thread> threads = new CopyOnWriteArrayList<>();
+    private final List<Thread> producers = new CopyOnWriteArrayList<>();
+    private final Collection<Throwable> producerFailures = new ConcurrentLinkedQueue<>();
     private final List<CompletableResultCode> pending = new ArrayList<>();
     private SharedQueueLogRecordProcessor processor;
     private SdkLoggerProvider provider;
@@ -48,6 +53,11 @@ class SharedQueueLogRecordProcessorTest {
         pending.forEach(CompletableResultCode::succeed);
         if (processor != null) assertTrue(processor.shutdown().join(3, SECONDS).isDone());
         if (provider != null) provider.close();
+        for (Thread producer : producers) {
+            producer.join(3000);
+            assertFalse(producer.isAlive(), "Producer survived shutdown");
+        }
+        assertTrue(producerFailures.isEmpty(), () -> "Producer failed: " + producerFailures);
         for (Thread thread : threads) {
             thread.join(3000);
             assertFalse(thread.isAlive(), "Consumer survived shutdown");
@@ -100,6 +110,7 @@ class SharedQueueLogRecordProcessorTest {
 
             assertEquals(2, reader.value("otel.sdk.processor.log.queue.size", ""));
             assertEquals(2, reader.value("otel.sdk.processor.log.queue.capacity", ""));
+            assertEquals(2, reader.gaugeValue("otlp.processor.log.queue.peak.size"));
             assertEquals(1, reader.value("otel.sdk.processor.log.processed", "queue_full"));
             assertEquals(2, exporters.stream().mapToInt(exporter -> exporter.received.size()).sum());
 
@@ -107,10 +118,285 @@ class SharedQueueLogRecordProcessorTest {
             assertTrue(processor.forceFlush().join(2, SECONDS).isSuccess());
             assertEquals(4, exporters.stream().mapToInt(exporter -> exporter.received.size()).sum());
             assertEquals(0, reader.value("otel.sdk.processor.log.queue.size", ""));
+            assertEquals(2, reader.gaugeValue("otlp.processor.log.queue.peak.size"));
             assertEquals(4, reader.value("otel.sdk.processor.log.processed", ""));
             assertTrue(processor.shutdown().join(2, SECONDS).isSuccess());
             assertEquals(0, reader.points("otel.sdk.processor.log.queue.size"));
             assertEquals(0, reader.points("otel.sdk.processor.log.queue.capacity"));
+            assertEquals(0, reader.points("otlp.processor.log.queue.peak.size"));
+            assertEquals(0, reader.points("otlp.processor.log.queue.blocked.producers"));
+        }
+    }
+
+    @Test
+    void queuePeakSurvivesDrainBeforeFirstCollectionAndSmallerBursts() throws Exception {
+        Reader reader = new Reader();
+        try (SdkMeterProvider metrics = SdkMeterProvider.builder().registerMetricReader(reader).build()) {
+            start(1, 4, 1, 60000, metrics);
+            CompletableResultCode first = pendingResult();
+            exporters.get(0).nextResults.add(first);
+            emit("in flight");
+            assertEquals(List.of("in flight"), exporters.get(0).batches.poll(2, SECONDS));
+            for (int index = 0; index < 4; index++) emit("queued " + index);
+            emit("dropped first");
+            emit("dropped second");
+            first.succeed();
+            assertTrue(processor.forceFlush().join(2, SECONDS).isSuccess());
+
+            var peak = reader.registration.collectAllMetrics().stream()
+                    .filter(metric -> metric.getName().equals("otlp.processor.log.queue.peak.size"))
+                    .findFirst().orElseThrow();
+            assertEquals(MetricDataType.LONG_GAUGE, peak.getType());
+            assertEquals("{log_record}", peak.getUnit());
+            var point = peak.getLongGaugeData().getPoints().iterator().next();
+            assertEquals(4, point.getValue());
+            assertEquals("shared_queue_log_processor",
+                    point.getAttributes().get(AttributeKey.stringKey("otel.component.type")));
+            assertEquals("shared_queue_log_processor/unit-test",
+                    point.getAttributes().get(AttributeKey.stringKey("otel.component.name")));
+            assertEquals(0, reader.value("otel.sdk.processor.log.queue.size", ""));
+            assertEquals(2, reader.value("otel.sdk.processor.log.processed", "queue_full"));
+            assertEquals(5, reader.value("otel.sdk.processor.log.processed", ""));
+
+            exporters.get(0).batches.clear();
+            CompletableResultCode second = pendingResult();
+            exporters.get(0).nextResults.add(second);
+            emit("in flight again");
+            assertEquals(List.of("in flight again"), exporters.get(0).batches.poll(2, SECONDS));
+            emit("smaller first");
+            emit("smaller second");
+            assertEquals(2, reader.value("otel.sdk.processor.log.queue.size", ""));
+            assertEquals(4, reader.gaugeValue("otlp.processor.log.queue.peak.size"));
+            second.succeed();
+            assertTrue(processor.forceFlush().join(2, SECONDS).isSuccess());
+            assertEquals(0, reader.value("otel.sdk.processor.log.queue.size", ""));
+            assertEquals(4, reader.gaugeValue("otlp.processor.log.queue.peak.size"));
+            assertEquals(4, reader.gaugeValue("otlp.processor.log.queue.peak.size"));
+        }
+    }
+
+    @Test
+    void newProcessorInstanceStartsWithZeroQueuePeak() throws Exception {
+        Reader reader = new Reader();
+        try (SdkMeterProvider metrics = SdkMeterProvider.builder().registerMetricReader(reader).build()) {
+            start(1, 2, 1, 60000, metrics);
+            CompletableResultCode first = pendingResult();
+            exporters.get(0).nextResults.add(first);
+            emit("in flight");
+            assertEquals(List.of("in flight"), exporters.get(0).batches.poll(2, SECONDS));
+            emit("queued first");
+            emit("queued second");
+            first.succeed();
+            assertTrue(processor.forceFlush().join(2, SECONDS).isSuccess());
+            assertEquals(2, reader.gaugeValue("otlp.processor.log.queue.peak.size"));
+            assertTrue(processor.shutdown().join(2, SECONDS).isSuccess());
+            provider.close();
+            exporters.clear();
+
+            start(1, 2, 1, 60000, metrics);
+
+            assertEquals(1, reader.points("otlp.processor.log.queue.peak.size"));
+            assertEquals(0, reader.gaugeValue("otlp.processor.log.queue.peak.size"));
+        }
+    }
+
+    @Test
+    void blockingProducerResumesWhenQueueSpaceIsAvailableAndRecordsItsWait() throws Exception {
+        Reader reader = new Reader();
+        try (SdkMeterProvider metrics = SdkMeterProvider.builder().registerMetricReader(reader).build()) {
+            start(1, 1, 1, 60000, true, metrics);
+            CompletableResultCode first = pendingResult();
+            CompletableResultCode second = pendingResult();
+            exporters.get(0).nextResults.add(first);
+            exporters.get(0).nextResults.add(second);
+            emit("in flight");
+            assertEquals(List.of("in flight"), exporters.get(0).batches.poll(2, SECONDS));
+            emit("queued");
+            CountDownLatch returned = new CountDownLatch(1);
+            startProducer(() -> {
+                emit("blocked");
+                returned.countDown();
+            });
+
+            awaitBlocked(reader, 1);
+            assertFalse(returned.await(100, MILLISECONDS));
+            assertEquals(1, reader.value("otel.sdk.processor.log.queue.size", ""));
+            assertEquals(0, reader.value("otel.sdk.processor.log.processed", "queue_full"));
+            assertEquals("{thread}", reader.unit("otlp.processor.log.queue.blocked.producers"));
+            first.succeed();
+
+            assertTrue(returned.await(2, SECONDS));
+            assertEquals(List.of("queued"), exporters.get(0).batches.poll(2, SECONDS));
+            assertFalse(second.isDone());
+            assertEquals(0, reader.value("otlp.processor.log.queue.blocked.producers", ""));
+            assertTrue(reader.doubleValue("otlp.processor.log.queue.blocked.duration") > 0);
+            assertEquals("s", reader.unit("otlp.processor.log.queue.blocked.duration"));
+            second.succeed();
+            assertTrue(processor.forceFlush().join(2, SECONDS).isSuccess());
+            assertEquals(List.of("in flight", "queued", "blocked"), List.copyOf(exporters.get(0).received));
+            assertEquals(3, reader.value("otel.sdk.processor.log.processed", ""));
+            assertEquals(0, reader.value("otel.sdk.processor.log.processed", "queue_full"));
+            assertTrue(processor.shutdown().join(2, SECONDS).isSuccess());
+            assertEquals(0, reader.points("otlp.processor.log.queue.blocked.producers"));
+        }
+    }
+
+    @Test
+    void blockedProducerFillsTheNextBatchWithoutWaitingForItsFormationDelay() throws Exception {
+        Reader reader = new Reader();
+        try (SdkMeterProvider metrics = SdkMeterProvider.builder().registerMetricReader(reader).build()) {
+            start(1, 2, 2, 60000, true, metrics);
+            CompletableResultCode first = pendingResult();
+            exporters.get(0).nextResults.add(first);
+            emit("active first");
+            emit("active second");
+            assertEquals(List.of("active first", "active second"), exporters.get(0).batches.poll(2, SECONDS));
+            emit("queued first");
+            emit("queued second");
+            CountDownLatch returned = new CountDownLatch(1);
+            startProducer(() -> {
+                emit("next first");
+                emit("next second");
+                returned.countDown();
+            });
+            awaitBlocked(reader, 1);
+
+            first.succeed();
+
+            assertTrue(returned.await(2, SECONDS));
+            assertEquals(List.of("queued first", "queued second"), exporters.get(0).batches.poll(2, SECONDS));
+            assertEquals(List.of("next first", "next second"), exporters.get(0).batches.poll(2, SECONDS));
+            assertTrue(processor.forceFlush().join(2, SECONDS).isSuccess());
+            assertEquals(6, reader.value("otel.sdk.processor.log.processed", ""));
+            assertEquals(0, reader.value("otel.sdk.processor.log.processed", "queue_full"));
+        }
+    }
+
+    @Test
+    void concurrentBlockingProducersShareTinyQueueAcrossConsumersWithoutLoss() throws Exception {
+        Reader reader = new Reader();
+        try (SdkMeterProvider metrics = SdkMeterProvider.builder().registerMetricReader(reader).build()) {
+            start(3, 1, 1, 60000, true, metrics);
+            Set<String> seen = ConcurrentHashMap.newKeySet();
+            AtomicInteger duplicates = new AtomicInteger();
+            exporters.forEach(exporter -> {
+                exporter.nextResults.add(pendingResult());
+                exporter.onRecord = body -> {
+                    if (!seen.add(body)) duplicates.incrementAndGet();
+                };
+            });
+            for (int index = 0; index < 3; index++) emit("active " + index);
+            for (StubExporter exporter : exporters) assertNotNull(exporter.batches.poll(2, SECONDS));
+            emit("queued");
+            var executor = Executors.newFixedThreadPool(4);
+            CountDownLatch ready = new CountDownLatch(4);
+            CountDownLatch begin = new CountDownLatch(1);
+            try {
+                List<java.util.concurrent.Future<?>> tasks = new ArrayList<>();
+                for (int producer = 0; producer < 4; producer++) {
+                    int index = producer;
+                    tasks.add(executor.submit(() -> {
+                        ready.countDown();
+                        assertTrue(begin.await(2, SECONDS));
+                        for (int record = 0; record < 250; record++) emit(index + ":" + record);
+                        return null;
+                    }));
+                }
+                assertTrue(ready.await(2, SECONDS));
+                begin.countDown();
+                awaitBlocked(reader, 4);
+                assertTrue(tasks.stream().noneMatch(java.util.concurrent.Future::isDone));
+                assertEquals(1, reader.gaugeValue("otlp.processor.log.queue.peak.size"));
+
+                pending.forEach(CompletableResultCode::succeed);
+
+                for (var task : tasks) task.get(3, SECONDS);
+                assertTrue(processor.forceFlush().join(3, SECONDS).isSuccess());
+                assertEquals(1004, seen.size());
+                assertEquals(0, duplicates.get());
+                assertEquals(1004, reader.value("otel.sdk.processor.log.processed", ""));
+                assertEquals(0, reader.value("otel.sdk.processor.log.processed", "queue_full"));
+                assertEquals(0, reader.value("otlp.processor.log.queue.blocked.producers", ""));
+                assertEquals(1, reader.gaugeValue("otlp.processor.log.queue.peak.size"));
+                assertTrue(reader.gaugeValue("otlp.processor.log.queue.peak.size")
+                        <= reader.value("otel.sdk.processor.log.queue.capacity", ""));
+                for (StubExporter exporter : exporters) assertEquals(0, exporter.concurrentCalls.get());
+            } finally {
+                begin.countDown();
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(3, SECONDS));
+            }
+        }
+    }
+
+    @Test
+    void interruptedProducerKeepsItsInterruptFlagAndDoesNotEnqueue() throws Exception {
+        Reader reader = new Reader();
+        try (SdkMeterProvider metrics = SdkMeterProvider.builder().registerMetricReader(reader).build()) {
+            start(1, 1, 1, 60000, true, metrics);
+            CompletableResultCode first = pendingResult();
+            exporters.get(0).nextResults.add(first);
+            emit("in flight");
+            assertNotNull(exporters.get(0).batches.poll(2, SECONDS));
+            emit("queued");
+            AtomicBoolean interrupted = new AtomicBoolean();
+            CountDownLatch returned = new CountDownLatch(1);
+            Thread producer = startProducer(() -> {
+                emit("cancelled");
+                interrupted.set(Thread.currentThread().isInterrupted());
+                returned.countDown();
+            });
+            awaitBlocked(reader, 1);
+
+            producer.interrupt();
+
+            assertTrue(returned.await(2, SECONDS));
+            assertTrue(interrupted.get());
+            assertEquals(0, reader.value("otlp.processor.log.queue.blocked.producers", ""));
+            assertTrue(reader.doubleValue("otlp.processor.log.queue.blocked.duration") > 0);
+            assertEquals(1, reader.value("otel.sdk.processor.log.processed", "interrupted"));
+            assertEquals(0, reader.value("otel.sdk.processor.log.processed", "queue_full"));
+            first.succeed();
+            assertTrue(processor.forceFlush().join(2, SECONDS).isSuccess());
+            assertEquals(List.of("in flight", "queued"), List.copyOf(exporters.get(0).received));
+        }
+    }
+
+    @Test
+    void shutdownReleasesAllBlockedProducersWhileAcceptedExportsArePending() throws Exception {
+        Reader reader = new Reader();
+        try (SdkMeterProvider metrics = SdkMeterProvider.builder().registerMetricReader(reader).build()) {
+            start(1, 1, 1, 60000, true, metrics);
+            CompletableResultCode first = pendingResult();
+            exporters.get(0).nextResults.add(first);
+            emit("in flight");
+            assertNotNull(exporters.get(0).batches.poll(2, SECONDS));
+            emit("queued");
+            CountDownLatch returned = new CountDownLatch(3);
+            for (int index = 0; index < 3; index++) {
+                startProducer(() -> {
+                    emit("cancelled");
+                    returned.countDown();
+                });
+            }
+            awaitBlocked(reader, 3);
+
+            CompletableResultCode stopping = processor.shutdown();
+
+            assertTrue(returned.await(2, SECONDS));
+            assertFalse(stopping.isDone());
+            assertEquals(0, reader.value("otlp.processor.log.queue.blocked.producers", ""));
+            assertTrue(reader.doubleValue("otlp.processor.log.queue.blocked.duration") > 0);
+            assertEquals(3, reader.value("otel.sdk.processor.log.processed", "shutdown"));
+            assertEquals(0, reader.value("otel.sdk.processor.log.processed", "queue_full"));
+            first.succeed();
+            assertTrue(stopping.join(2, SECONDS).isSuccess());
+            assertEquals(List.of("in flight", "queued"), List.copyOf(exporters.get(0).received));
+            assertEquals(1, exporters.get(0).shutdownCalls.get());
+            assertEquals(0, reader.points("otel.sdk.processor.log.queue.size"));
+            assertEquals(0, reader.points("otel.sdk.processor.log.queue.capacity"));
+            assertEquals(0, reader.points("otlp.processor.log.queue.peak.size"));
+            assertEquals(0, reader.points("otlp.processor.log.queue.blocked.producers"));
         }
     }
 
@@ -324,6 +610,8 @@ class SharedQueueLogRecordProcessorTest {
             assertEquals(1, exporter.shutdownCalls.get());
             assertEquals(0, reader.points("otel.sdk.processor.log.queue.size"));
             assertEquals(0, reader.points("otel.sdk.processor.log.queue.capacity"));
+            assertEquals(0, reader.points("otlp.processor.log.queue.peak.size"));
+            assertEquals(0, reader.points("otlp.processor.log.queue.blocked.producers"));
         }
     }
 
@@ -340,11 +628,15 @@ class SharedQueueLogRecordProcessorTest {
             threads.add(thread);
             return thread;
         };
-        assertThrows(IllegalStateException.class, () -> new SharedQueueLogRecordProcessor("startup",
-                List.of(first, second), 4, 1, 10, MeterProvider.noop(), factory));
-        assertEquals(1, first.shutdownCalls.get());
-        assertEquals(1, second.shutdownCalls.get());
-        assertTrue(threads.stream().noneMatch(Thread::isAlive));
+        Reader reader = new Reader();
+        try (SdkMeterProvider metrics = SdkMeterProvider.builder().registerMetricReader(reader).build()) {
+            assertThrows(IllegalStateException.class, () -> new SharedQueueLogRecordProcessor("startup",
+                    List.of(first, second), 4, 1, 10, metrics, factory));
+            assertEquals(1, first.shutdownCalls.get());
+            assertEquals(1, second.shutdownCalls.get());
+            assertTrue(threads.stream().noneMatch(Thread::isAlive));
+            assertEquals(0, reader.points("otlp.processor.log.queue.peak.size"));
+        }
     }
 
     private void start(int consumers, int capacity, int batchSize, long delayMillis, MeterProvider metrics) {
@@ -356,6 +648,39 @@ class SharedQueueLogRecordProcessorTest {
                     return thread;
                 });
         provider = SdkLoggerProvider.builder().addLogRecordProcessor(processor).build();
+    }
+
+    private void start(int consumers, int capacity, int batchSize, long delayMillis,
+                       boolean blockOnOverflow, MeterProvider metrics) {
+        for (int index = 0; index < consumers; index++) exporters.add(new StubExporter());
+        processor = new SharedQueueLogRecordProcessor("unit-test", new ArrayList<>(exporters), capacity,
+                batchSize, delayMillis, blockOnOverflow, metrics, action -> {
+                    Thread thread = new Thread(action);
+                    threads.add(thread);
+                    return thread;
+                });
+        provider = SdkLoggerProvider.builder().addLogRecordProcessor(processor).build();
+    }
+
+    private Thread startProducer(Runnable action) {
+        Thread producer = new Thread(() -> {
+            try {
+                action.run();
+            } catch (Throwable failure) {
+                producerFailures.add(failure);
+            }
+        }, "test-log-producer");
+        producer.setDaemon(true);
+        producers.add(producer);
+        producer.start();
+        return producer;
+    }
+
+    private static void awaitBlocked(Reader reader, int count) throws InterruptedException {
+        long deadline = System.nanoTime() + SECONDS.toNanos(2);
+        while (reader.value("otlp.processor.log.queue.blocked.producers", "") != count
+                && System.nanoTime() < deadline) Thread.sleep(5);
+        assertEquals(count, reader.value("otlp.processor.log.queue.blocked.producers", ""));
     }
 
     private void emit(String body) {
@@ -432,7 +757,24 @@ class SharedQueueLogRecordProcessorTest {
 
         private long points(String name) {
             return registration.collectAllMetrics().stream().filter(metric -> metric.getName().equals(name))
-                    .mapToLong(metric -> metric.getLongSumData().getPoints().size()).sum();
+                    .mapToLong(metric -> metric.getData().getPoints().size()).sum();
+        }
+
+        private long gaugeValue(String name) {
+            return registration.collectAllMetrics().stream().filter(metric -> metric.getName().equals(name))
+                    .flatMap(metric -> metric.getLongGaugeData().getPoints().stream())
+                    .mapToLong(point -> point.getValue()).sum();
+        }
+
+        private double doubleValue(String name) {
+            return registration.collectAllMetrics().stream().filter(metric -> metric.getName().equals(name))
+                    .flatMap(metric -> metric.getDoubleSumData().getPoints().stream())
+                    .mapToDouble(point -> point.getValue()).sum();
+        }
+
+        private String unit(String name) {
+            return registration.collectAllMetrics().stream().filter(metric -> metric.getName().equals(name))
+                    .map(metric -> metric.getUnit()).findFirst().orElseThrow();
         }
     }
 }

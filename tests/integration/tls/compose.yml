@@ -1,0 +1,40 @@
+name: otlp-tls-demo
+
+services:
+  logstash:
+    build:
+      context: ../../..
+      dockerfile: tests/integration/Dockerfile
+    environment:
+      LS_JAVA_OPTS: -Xms256m -Xmx512m
+      XPACK_MONITORING_ENABLED: "false"
+      OTLP_ENDPOINT: ${OTLP_ENDPOINT:-https://collector:4318/v1/logs}
+      OTLP_PROTOCOL: ${OTLP_PROTOCOL:-http}
+      OTLP_CA: ${OTLP_CA:-/certs/ca.crt}
+      TLS_SKIP_VERIFY: ${TLS_SKIP_VERIFY:-false}
+    ports:
+      - "127.0.0.1:18480:8080"
+      - "127.0.0.1:19640:9600"
+    volumes:
+      - ./logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+      - ../../../build/tls-certs/ca.crt:/certs/ca.crt:ro
+      - ../../../build/tls-certs/wrong-ca.crt:/certs/wrong-ca.crt:ro
+    command: ["--pipeline.workers", "2", "--pipeline.ecs_compatibility", "disabled", "--log.level", "info"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9600/_node/stats/pipelines/main | grep -q '\"events\"'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      - collector
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.131.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    networks:
+      default:
+        aliases: [collector-wrong]
+    volumes:
+      - ./collector.yaml:/etc/otelcol/config.yaml:ro
+      - ../../../build/tls-certs/collector.crt:/certs/collector.crt:ro
+      - ../../../build/tls-certs/collector.key:/certs/collector.key:ro
