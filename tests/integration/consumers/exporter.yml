@@ -45,6 +45,39 @@ modules:
           error_type: '{.error_type}'
         values:
           processed_total: '{.value}'
+      - name: otlp_processor_log_queue
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="consumers_test")].sdk_metrics.otlp_processor_log_queue_peak_size.*}'
+        valuetype: gauge
+        labels:
+          pipeline: main
+          plugin_id: consumers_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+        values:
+          peak_size: '{.value}'
+      - name: otlp_processor_log_queue
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="consumers_test")].sdk_metrics.otlp_processor_log_queue_blocked_producers.*}'
+        valuetype: gauge
+        labels:
+          pipeline: main
+          plugin_id: consumers_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+        values:
+          blocked_producers: '{.value}'
+      - name: otlp_processor_log_queue
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="consumers_test")].sdk_metrics.otlp_processor_log_queue_blocked_duration.*}'
+        valuetype: counter
+        labels:
+          pipeline: main
+          plugin_id: consumers_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+        values:
+          blocked_duration_seconds_total: '{.value}'
       - name: otel_sdk_exporter_log
         type: object
         path: '{.pipelines.main.plugins.outputs[?(@.id=="consumers_test")].sdk_metrics.otel_sdk_exporter_log_inflight.*}'
@@ -90,6 +123,17 @@ modules:
       - name: logstash_jvm_heap_used_bytes
         path: '{.jvm.mem.heap_used_in_bytes}'
         valuetype: gauge
+      - name: logstash_pipeline_queue_backpressure
+        path: '{.pipelines.main.flow.queue_backpressure.current}'
+        valuetype: gauge
+        labels:
+          pipeline: main
+      - name: logstash_output_worker_utilization
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="consumers_test")].flow.worker_utilization.current}'
+        valuetype: gauge
+        labels:
+          pipeline: main
+          plugin_id: consumers_test
       - name: logstash_jvm_heap_committed_bytes
         path: '{.jvm.mem.heap_committed_in_bytes}'
         valuetype: gauge

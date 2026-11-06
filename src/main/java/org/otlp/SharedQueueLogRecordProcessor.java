@@ -3,8 +3,10 @@ package org.otlp;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.metrics.LongCounter;
+import io.opentelemetry.api.metrics.DoubleCounter;
 import io.opentelemetry.api.metrics.MeterProvider;
 import io.opentelemetry.api.metrics.ObservableLongUpDownCounter;
+import io.opentelemetry.api.metrics.ObservableLongGauge;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.sdk.common.CompletableResultCode;
 import io.opentelemetry.sdk.logs.LogRecordProcessor;
@@ -29,6 +31,7 @@ final class SharedQueueLogRecordProcessor implements LogRecordProcessor {
     private static final AttributeKey<String> ERROR_TYPE = AttributeKey.stringKey("error.type");
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
+    private final Condition spaceAvailable = lock.newCondition();
     private final ArrayDeque<QueuedLog> queue = new ArrayDeque<>();
     private final List<Worker> workers = new ArrayList<>();
     private final CompletableResultCode shutdownResult = new CompletableResultCode();
@@ -37,11 +40,17 @@ final class SharedQueueLogRecordProcessor implements LogRecordProcessor {
     private final int capacity;
     private final int maxBatchSize;
     private final long scheduleDelayNanos;
+    private final boolean blockOnOverflow;
     private final Attributes attributes;
     private final Attributes droppedAttributes;
     private final LongCounter processed;
+    private final DoubleCounter blockedDuration;
     private ObservableLongUpDownCounter queueSizeMetric;
     private ObservableLongUpDownCounter queueCapacityMetric;
+    private ObservableLongUpDownCounter blockedProducersMetric;
+    private ObservableLongGauge queuePeakMetric;
+    private int blockedProducers;
+    private int queuePeakSize;
     private long accepted;
     private boolean stopping;
     private boolean startupFailed;
@@ -52,22 +61,36 @@ final class SharedQueueLogRecordProcessor implements LogRecordProcessor {
 
     SharedQueueLogRecordProcessor(String outputId, List<LogRecordExporter> exporters, int queueSize,
                                  int maxBatchSize, long scheduleDelayMillis, MeterProvider meterProvider) {
-        this(outputId, exporters, queueSize, maxBatchSize, scheduleDelayMillis, meterProvider, Thread::new);
+        this(outputId, exporters, queueSize, maxBatchSize, scheduleDelayMillis, false, meterProvider, Thread::new);
     }
 
     SharedQueueLogRecordProcessor(String outputId, List<LogRecordExporter> exporters, int queueSize,
                                  int maxBatchSize, long scheduleDelayMillis, MeterProvider meterProvider,
                                  ThreadFactory threadFactory) {
+        this(outputId, exporters, queueSize, maxBatchSize, scheduleDelayMillis, false, meterProvider, threadFactory);
+    }
+
+    SharedQueueLogRecordProcessor(String outputId, List<LogRecordExporter> exporters, int queueSize,
+                                 int maxBatchSize, long scheduleDelayMillis, boolean blockOnOverflow,
+                                 MeterProvider meterProvider) {
+        this(outputId, exporters, queueSize, maxBatchSize, scheduleDelayMillis, blockOnOverflow, meterProvider, Thread::new);
+    }
+
+    SharedQueueLogRecordProcessor(String outputId, List<LogRecordExporter> exporters, int queueSize,
+                                 int maxBatchSize, long scheduleDelayMillis, boolean blockOnOverflow,
+                                 MeterProvider meterProvider, ThreadFactory threadFactory) {
         List<LogRecordExporter> ownedExporters = new ArrayList<>(Objects.requireNonNull(exporters));
         remainingWorkers = new AtomicInteger(ownedExporters.size());
         capacity = queueSize;
         this.maxBatchSize = maxBatchSize;
+        this.blockOnOverflow = blockOnOverflow;
         scheduleDelayNanos = TimeUnit.MILLISECONDS.toNanos(scheduleDelayMillis);
         attributes = Attributes.builder()
                 .put("otel.component.type", "shared_queue_log_processor")
                 .put("otel.component.name", "shared_queue_log_processor/" + outputId).build();
         droppedAttributes = attributes.toBuilder().put(ERROR_TYPE, "queue_full").build();
         LongCounter counter;
+        DoubleCounter durationCounter;
         try {
             if (ownedExporters.isEmpty()) throw new IllegalArgumentException("num_consumers must be positive");
             if (queueSize <= 0) throw new IllegalArgumentException("queue_size must be positive");
@@ -80,10 +103,17 @@ final class SharedQueueLogRecordProcessor implements LogRecordProcessor {
             var meter = Objects.requireNonNull(meterProvider).get("org.otlp.shared_queue");
             counter = meter.counterBuilder("otel.sdk.processor.log.processed")
                     .setUnit("{log_record}").build();
+            durationCounter = meter.counterBuilder("otlp.processor.log.queue.blocked.duration")
+                    .ofDoubles().setUnit("s").build();
+            durationCounter.add(0, attributes);
             queueSizeMetric = meter.upDownCounterBuilder("otel.sdk.processor.log.queue.size")
                     .setUnit("{log_record}").buildWithCallback(value -> value.record(queueSize(), attributes));
             queueCapacityMetric = meter.upDownCounterBuilder("otel.sdk.processor.log.queue.capacity")
                     .setUnit("{log_record}").buildWithCallback(value -> value.record(capacity, attributes));
+            queuePeakMetric = meter.gaugeBuilder("otlp.processor.log.queue.peak.size").ofLongs()
+                    .setUnit("{log_record}").buildWithCallback(value -> value.record(queuePeakSize(), attributes));
+            blockedProducersMetric = meter.upDownCounterBuilder("otlp.processor.log.queue.blocked.producers")
+                    .setUnit("{thread}").buildWithCallback(value -> value.record(blockedProducers(), attributes));
             for (int index = 0; index < ownedExporters.size(); index++) {
                 Worker worker = new Worker(Objects.requireNonNull(ownedExporters.get(index)));
                 worker.thread = Objects.requireNonNull(threadFactory.newThread(worker));
@@ -102,6 +132,7 @@ final class SharedQueueLogRecordProcessor implements LogRecordProcessor {
             throw failure;
         }
         processed = counter;
+        blockedDuration = durationCounter;
         int started = 0;
         try {
             for (Worker worker : workers) {
@@ -114,6 +145,7 @@ final class SharedQueueLogRecordProcessor implements LogRecordProcessor {
                 startupFailed = true;
                 stopping = true;
                 changed.signalAll();
+                spaceAvailable.signalAll();
             } finally {
                 lock.unlock();
             }
@@ -137,20 +169,47 @@ final class SharedQueueLogRecordProcessor implements LogRecordProcessor {
     @Override
     public void onEmit(Context context, ReadWriteLogRecord logRecord) {
         if (logRecord == null) return;
-        boolean dropped = false;
+        String error = null;
+        boolean waited = false;
+        long started = 0;
         lock.lock();
         try {
             if (stopping) return;
-            if (queue.size() == capacity) {
-                dropped = true;
-            } else {
+            while (queue.size() == capacity && !stopping) {
+                if (!blockOnOverflow) {
+                    error = "queue_full";
+                    break;
+                }
+                if (!waited) {
+                    waited = true;
+                    started = System.nanoTime();
+                    blockedProducers++;
+                }
+                try {
+                    spaceAvailable.await();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    error = "interrupted";
+                    break;
+                }
+            }
+            if (error == null && stopping) error = "shutdown";
+            if (error == null) {
                 queue.addLast(new QueuedLog(++accepted, logRecord.toLogRecordData()));
+                queuePeakSize = Math.max(queuePeakSize, queue.size());
                 changed.signal();
+            } else {
+                processed.add(1, "queue_full".equals(error) ? droppedAttributes
+                        : attributes.toBuilder().put(ERROR_TYPE, error).build());
             }
         } finally {
+            if (waited) {
+                blockedProducers--;
+                blockedDuration.add((System.nanoTime() - started) / 1_000_000_000.0, attributes);
+            }
             lock.unlock();
         }
-        if (dropped) processed.add(1, droppedAttributes);
+        if (waited) finishShutdownWhenReady();
     }
 
     @Override
@@ -185,6 +244,7 @@ final class SharedQueueLogRecordProcessor implements LogRecordProcessor {
         try {
             stopping = true;
             changed.signalAll();
+            spaceAvailable.signalAll();
         } finally {
             lock.unlock();
         }
@@ -198,6 +258,28 @@ final class SharedQueueLogRecordProcessor implements LogRecordProcessor {
         } finally {
             lock.unlock();
         }
+    }
+
+    private int blockedProducers() {
+        lock.lock();
+        try {
+            return blockedProducers;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private int queuePeakSize() {
+        lock.lock();
+        try {
+            return queuePeakSize;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void signalSpace(int released) {
+        for (int index = 0; index < Math.min(released, blockedProducers); index++) spaceAvailable.signal();
     }
 
     private boolean finishedThrough(long target) {
@@ -298,12 +380,24 @@ final class SharedQueueLogRecordProcessor implements LogRecordProcessor {
     private void closeMetrics() {
         ObservableLongUpDownCounter size = queueSizeMetric;
         ObservableLongUpDownCounter limit = queueCapacityMetric;
+        ObservableLongUpDownCounter blocked = blockedProducersMetric;
+        ObservableLongGauge peak = queuePeakMetric;
         queueSizeMetric = null;
         queueCapacityMetric = null;
+        blockedProducersMetric = null;
+        queuePeakMetric = null;
         try {
             if (size != null) size.close();
         } finally {
-            if (limit != null) limit.close();
+            try {
+                if (limit != null) limit.close();
+            } finally {
+                try {
+                    if (blocked != null) blocked.close();
+                } finally {
+                    if (peak != null) peak.close();
+                }
+            }
         }
     }
 
@@ -315,7 +409,8 @@ final class SharedQueueLogRecordProcessor implements LogRecordProcessor {
     private void finishShutdownWhenReady() {
         lock.lock();
         try {
-            if (remainingWorkers.get() != 0 || activeFlush != null || nextFlush != null || finishingShutdown) return;
+            if (remainingWorkers.get() != 0 || blockedProducers != 0
+                    || activeFlush != null || nextFlush != null || finishingShutdown) return;
             finishingShutdown = true;
         } finally {
             lock.unlock();
@@ -382,11 +477,16 @@ final class SharedQueueLogRecordProcessor implements LogRecordProcessor {
                 if (startupFailed || queue.isEmpty()) return null;
                 ArrayList<LogRecordData> batch = new ArrayList<>(Math.min(maxBatchSize, queue.size()));
                 QueuedLog first = queue.removeFirst();
+                signalSpace(1);
                 firstSequence = first.sequence;
                 batch.add(first.record);
                 long started = System.nanoTime();
                 while (batch.size() < maxBatchSize) {
-                    while (!queue.isEmpty() && batch.size() < maxBatchSize) batch.add(queue.removeFirst().record);
+                    if (!queue.isEmpty()) {
+                        int previousSize = queue.size();
+                        while (!queue.isEmpty() && batch.size() < maxBatchSize) batch.add(queue.removeFirst().record);
+                        signalSpace(previousSize - queue.size());
+                    }
                     if (batch.size() == maxBatchSize || stopping || flushRequested(firstSequence)) break;
                     long remaining = scheduleDelayNanos - (System.nanoTime() - started);
                     if (remaining <= 0) break;

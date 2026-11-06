@@ -33,6 +33,17 @@ modules:
           otel_component_name: '{.otel_component_name}'
         values:
           capacity: '{.value}'
+      - name: otlp_processor_log_queue
+        type: object
+        path: '{.pipelines.main.plugins.outputs[?(@.id=="queue_test")].sdk_metrics.otlp_processor_log_queue_peak_size.*}'
+        valuetype: gauge
+        labels:
+          pipeline: main
+          plugin_id: queue_test
+          otel_component_type: '{.otel_component_type}'
+          otel_component_name: '{.otel_component_name}'
+        values:
+          peak_size: '{.value}'
       - name: otel_sdk_processor_log
         type: object
         path: '{.pipelines.main.plugins.outputs[?(@.id=="queue_test")].sdk_metrics.otel_sdk_processor_log_processed.*}'

@@ -1,0 +1,39 @@
+name: otlp-backpressure-demo
+
+services:
+  logstash:
+    extends:
+      file: ../consumers/compose.yml
+      service: logstash
+    environment:
+      LS_JAVA_OPTS: ${LS_JAVA_OPTS:--Xms512m -Xmx512m}
+      QUEUE_SIZE: ${QUEUE_SIZE:-2048}
+      NUM_CONSUMERS: ${NUM_CONSUMERS:-1}
+      MAX_BATCH_SIZE: ${MAX_BATCH_SIZE:-512}
+      BLOCK_ON_OVERFLOW: ${BLOCK_ON_OVERFLOW:-false}
+      OTLP_PROTOCOL: grpc
+      OTLP_ENDPOINT: http://toxiproxy:4317
+    depends_on:
+      - toxiproxy
+
+  collector:
+    extends:
+      file: ../consumers/compose.yml
+      service: collector
+
+  exporter:
+    extends:
+      file: ../consumers/compose.yml
+      service: exporter
+
+  prometheus:
+    extends:
+      file: ../consumers/compose.yml
+      service: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  toxiproxy:
+    extends:
+      file: ../consumers/compose.latency.yml
+      service: toxiproxy

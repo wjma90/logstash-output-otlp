@@ -19,7 +19,7 @@ Run `make gem` from the repository root. Clear earlier environment overrides and
 
 ```sh
 cd tests/integration/regression-load
-unset NUM_CONSUMERS QUEUE_SIZE MAX_BATCH_SIZE LS_JAVA_OPTS SCHEDULE_DELAY_MILLIS OTLP_TIMEOUT
+unset NUM_CONSUMERS QUEUE_SIZE MAX_BATCH_SIZE LS_JAVA_OPTS SCHEDULE_DELAY_MILLIS OTLP_TIMEOUT BLOCK_ON_OVERFLOW
 docker compose up -d collector toxiproxy
 curl --retry 10 --retry-connrefused --retry-delay 1 -fsS -X POST http://localhost:18474/proxies/otlp/toxics \
   -H 'Content-Type: application/json' \
@@ -118,6 +118,23 @@ Drain the Collector queues and repeat the Loki query with the new run ID. Queue
 drops are lost; failed exports can have uncertain delivery if the receiver
 accepted records before the connection failed.
 
+## Repeat with backpressure
+
+After draining, enable blocking and repeat the load and outage steps with a new run ID:
+
+```sh
+export BLOCK_ON_OVERFLOW=true
+docker compose up -d --no-deps --force-recreate --wait logstash
+```
+
+Expect no `queue_full` drops or overflow WARN. While full,
+`otlp_processor_log_queue_blocked_producers` rises and input slows down.
+`otlp_processor_log_queue_blocked_duration_seconds_total` accumulates completed waits;
+`otlp_processor_log_queue_peak_size` retains the highest queue size.
+The generator can take longer to finish. Export timeouts still produce errors and
+failed records; blocking does not prevent those losses. After recovery, verify
+queue/inflight/blocked producers return to zero and new records reach Loki.
+
 ## Check resources and stop
 
 Watch resources before, during and after load; press Ctrl-C to stop watching:
@@ -134,6 +151,7 @@ docker compose exec -T logstash /usr/share/logstash/jdk/bin/jcmd 1 Thread.print 
 time docker compose stop -t 120 logstash
 docker inspect --format '{{.State.ExitCode}} {{.State.OOMKilled}}' $(docker compose ps -aq logstash)
 docker compose down
+unset BLOCK_ON_OVERFLOW
 rm "$load_report"
 ```
 

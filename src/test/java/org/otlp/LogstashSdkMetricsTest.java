@@ -62,12 +62,69 @@ class LogstashSdkMetricsTest {
             assertEquals(Set.of("sdk_metrics"), nativeMetrics.values.keySet());
             assertEquals(0, nativeMetrics.metricValue("otel.sdk.processor.log.queue.size", ""));
             assertEquals(64, nativeMetrics.metricValue("otel.sdk.processor.log.queue.capacity", ""));
+            assertEquals(0, nativeMetrics.metricValue("otlp.processor.log.queue.peak.size", ""));
+            assertEquals(0, nativeMetrics.metricValue("otlp.processor.log.queue.blocked.producers", ""));
+            assertEquals(0, nativeMetrics.metricValue("otlp.processor.log.queue.blocked.duration", ""));
             assertEquals("shared_queue_log_processor/validation-only",
                     nativeMetrics.point("otel.sdk.processor.log.queue.size", "").get("otel_component_name"));
             assertEquals("{log_record}",
                     nativeMetrics.point("otel.sdk.processor.log.queue.capacity", "").get("unit"));
+            assertEquals("{log_record}",
+                    nativeMetrics.point("otlp.processor.log.queue.peak.size", "").get("unit"));
+            assertEquals("shared_queue_log_processor/validation-only",
+                    nativeMetrics.point("otlp.processor.log.queue.peak.size", "").get("otel_component_name"));
+            assertEquals("shared_queue_log_processor",
+                    nativeMetrics.point("otlp.processor.log.queue.peak.size", "").get("otel_component_type"));
         }
         assertTrue(metricWorkers("validation-only").isEmpty());
+    }
+
+    @Test
+    void publishesBackpressureAndCompletedWaitTimeWithoutReportingDrops() throws Exception {
+        RecordingMetrics nativeMetrics = new RecordingMetrics();
+        try (LogCapture capture = new LogCapture();
+             LogstashSdkMetrics metrics = new LogstashSdkMetrics(capture.logger, "blocked-test", 1, nativeMetrics)) {
+            BlockingExporter exporter = new BlockingExporter();
+            var producer = Executors.newSingleThreadExecutor();
+            SdkLoggerProvider provider = SdkLoggerProvider.builder()
+                    .addLogRecordProcessor(new SharedQueueLogRecordProcessor("blocked-test", List.of(exporter),
+                            1, 1, 1000, true, metrics.meterProvider())).build();
+            try {
+                var logger = provider.get("blocked-test");
+                logger.logRecordBuilder().setBody("in flight").emit();
+                assertTrue(exporter.started.await(2, SECONDS));
+                logger.logRecordBuilder().setBody("queued").emit();
+                var waiting = producer.submit(() -> logger.logRecordBuilder().setBody("waiting").emit());
+                long deadline = System.nanoTime() + SECONDS.toNanos(2);
+                do {
+                    collect(metrics);
+                    if (nativeMetrics.metricValue("otlp.processor.log.queue.blocked.producers", "") == 1) break;
+                    Thread.sleep(10);
+                } while (System.nanoTime() < deadline);
+                assertEquals(1, nativeMetrics.metricValue("otlp.processor.log.queue.blocked.producers", ""));
+                assertFalse(waiting.isDone());
+                assertEquals(0, nativeMetrics.droppedRecords());
+                assertTrue(capture.events.isEmpty());
+
+                exporter.pending.succeed();
+                waiting.get(2, SECONDS);
+                assertTrue(provider.forceFlush().join(2, SECONDS).isSuccess());
+                collect(metrics);
+                assertEquals(0, nativeMetrics.metricValue("otlp.processor.log.queue.blocked.producers", ""));
+                assertEquals(1, nativeMetrics.metricValue("otlp.processor.log.queue.peak.size", ""));
+                Map<String, Object> duration = nativeMetrics.point("otlp.processor.log.queue.blocked.duration", "");
+                assertEquals("s", duration.get("unit"));
+                assertTrue(((Number) duration.get("value")).doubleValue() > 0);
+                assertEquals(3, nativeMetrics.metricValue("otel.sdk.processor.log.processed", ""));
+                assertEquals(0, nativeMetrics.droppedRecords());
+                assertTrue(capture.events.isEmpty());
+            } finally {
+                exporter.pending.succeed();
+                producer.shutdownNow();
+                assertTrue(producer.awaitTermination(2, SECONDS));
+                provider.close();
+            }
+        }
     }
 
     @Test
@@ -129,6 +186,7 @@ class LogstashSdkMetricsTest {
                 assertEquals(0, nativeMetrics.droppedRecords());
                 assertEquals(2, nativeMetrics.metricValue("otel.sdk.processor.log.queue.capacity", ""));
                 assertEquals(2, nativeMetrics.metricValue("otel.sdk.processor.log.queue.size", ""));
+                assertEquals(2, nativeMetrics.metricValue("otlp.processor.log.queue.peak.size", ""));
 
                 logger.logRecordBuilder().setBody("dropped").emit();
                 collect(metrics);
@@ -145,6 +203,13 @@ class LogstashSdkMetricsTest {
                 long deadline = System.nanoTime() + SECONDS.toNanos(3);
                 while (nativeMetrics.metricValue("otel.sdk.processor.log.queue.size", "") != 0 && System.nanoTime() < deadline) Thread.sleep(10);
                 assertEquals(0, nativeMetrics.metricValue("otel.sdk.processor.log.queue.size", ""));
+                assertEquals(2, nativeMetrics.metricValue("otlp.processor.log.queue.peak.size", ""));
+                assertEquals("{log_record}",
+                        nativeMetrics.point("otlp.processor.log.queue.peak.size", "").get("unit"));
+                assertEquals("shared_queue_log_processor/queue-test",
+                        nativeMetrics.point("otlp.processor.log.queue.peak.size", "").get("otel_component_name"));
+                collect(metrics);
+                assertEquals(2, nativeMetrics.metricValue("otlp.processor.log.queue.peak.size", ""));
                 assertEquals(1, nativeMetrics.droppedRecords());
             } finally {
                 exporter.pending.succeed();
@@ -229,6 +294,8 @@ class LogstashSdkMetricsTest {
         RecordingMetrics nativeMetrics = new RecordingMetrics();
         try (LogCapture capture = new LogCapture();
              LogstashSdkMetrics metrics = new LogstashSdkMetrics(capture.logger, "queue-test", 32, nativeMetrics, clock::get)) {
+            assertEquals(0, nativeMetrics.metricValue("otlp.processor.log.queue.peak.size", ""));
+            assertTrue(metricWorkers("queue-test").isEmpty());
             LongCounter counter = counter(metrics);
             counter.add(100, Attributes.empty());
             collect(metrics);

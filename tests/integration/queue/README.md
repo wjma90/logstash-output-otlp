@@ -2,17 +2,19 @@
 
 This test uses a shared 32-record queue, one consumer, batches of 1, and a JSON exporter for Prometheus.
 Metrics appear under the output's `sdk_metrics` in Logstash's Node Stats API.
-Prometheus exposes these SDK series:
+Prometheus exposes these SDK and plugin series:
 
 | Metric | Meaning |
 | --- | --- |
 | `otel_sdk_processor_log_queue_size` | Records waiting in the shared queue, excluding the export in progress. |
 | `otel_sdk_processor_log_queue_capacity` | Queue capacity. |
+| `otlp_processor_log_queue_peak_size` | Highest queue occupancy since this output instance started; retained after draining. |
 | `otel_sdk_processor_log_processed_total{error_type="queue_full"}` | Total records dropped because the queue was full. |
 
 Metrics refresh every second. Drops produce a `WARN`, limited to one every 30 seconds.
 Run the generator locally with Python 3; use `curl` and `jq` to check the results.
-Processor metrics use the OTel SDK names; exporter metrics come from the SDK's `LATEST` schema.
+The `otel_sdk_*` series use OTel SDK names. The peak is a plugin-specific gauge;
+it resets when the output instance is recreated, not when the queue drains.
 
 This demo uses JSON Exporter with explicit mappings. `kuskoman/logstash-exporter`
 v1.9.2 ignores these custom fields; using it alone requires adding support in its
@@ -44,6 +46,7 @@ v1.9.2 ignores these custom fields; using it alone requires adding support in it
    ```promql
    otel_sdk_processor_log_queue_size
    otel_sdk_processor_log_queue_capacity
+   otlp_processor_log_queue_peak_size
    otel_sdk_processor_log_processed_total{error_type="queue_full"}
    otel_sdk_exporter_log_inflight
    otel_sdk_exporter_log_exported_total{error_type=""}
@@ -88,6 +91,7 @@ v1.9.2 ignores these custom fields; using it alone requires adding support in it
    | SDK processed with `error_type="queue_full"` | Absent (no drops) | 967 | 967 |
    | SDK queue size | 0 | 32 | 0 |
    | SDK queue capacity | 32 | 32 | 32 |
+   | Plugin queue peak | ≤16 | 32 | 32 |
    | Queue-full query above | 0 | 1 | 0 |
 
    After resuming, 33 records reach the Collector. The drop counter remains at
