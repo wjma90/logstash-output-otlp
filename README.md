@@ -385,6 +385,8 @@ See [tests/integration](tests/integration/README.md) for manual tests of export
 errors, queue metrics, consumer comparisons and the timestamp fix for Loki.
 The [TLS test](tests/integration/tls/README.md) checks HTTP and gRPC with a trusted
 CA, certificate rejection and optional verification bypass.
+The [Spring TCP test](tests/integration/spring-tcp/README.md) compares current and
+tuned configurations at 13,000 logs/s, including delivery, application blocking and resources.
 The [regression load test](tests/integration/regression-load/README.md) combines
 sustained load, Loki timestamp checks and recovery after an export outage.
 

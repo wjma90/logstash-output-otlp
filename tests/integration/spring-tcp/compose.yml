@@ -1,0 +1,113 @@
+name: otlp-spring-tcp-demo
+
+services:
+  spring-client:
+    build:
+      context: ./client
+    environment:
+      JAVA_TOOL_OPTIONS: ${CLIENT_JAVA_OPTS:--Xms256m -Xmx512m}
+      LOGSTASH_DESTINATION: logstash:9700
+      RING_BUFFER_SIZE: ${RING_BUFFER_SIZE:-8192}
+      APPEND_TIMEOUT: ${APPEND_TIMEOUT:-0}
+      WRITE_TIMEOUT: 60 seconds
+      OTEL_SERVICE_NAME: spring-tcp-client
+      OTEL_RESOURCE_ATTRIBUTES: service.instance.id=spring-tcp-client,deployment.environment.name=integration
+      OTEL_METRICS_EXPORTER: otlp
+      OTEL_TRACES_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://metrics-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_METRIC_EXPORT_INTERVAL: "1000"
+      OTEL_INSTRUMENTATION_MICROMETER_ENABLED: "false"
+      OTEL_INSTRUMENTATION_LOGBACK_APPENDER_ENABLED: "false"
+    ports:
+      - "127.0.0.1:18090:8080"
+    stop_grace_period: 2m
+    depends_on:
+      metrics-collector:
+        condition: service_started
+      logstash:
+        condition: service_healthy
+
+  logstash:
+    build:
+      context: ../../..
+      dockerfile: tests/integration/Dockerfile
+    environment:
+      LS_JAVA_OPTS: ${LS_JAVA_OPTS:--Xms512m -Xmx512m}
+      XPACK_MONITORING_ENABLED: "false"
+      QUEUE_SIZE: ${QUEUE_SIZE:-2048}
+      BLOCK_ON_OVERFLOW: ${BLOCK_ON_OVERFLOW:-true}
+      NUM_CONSUMERS: ${NUM_CONSUMERS:-2}
+      MAX_BATCH_SIZE: ${MAX_BATCH_SIZE:-256}
+      SCHEDULE_DELAY_MILLIS: ${SCHEDULE_DELAY_MILLIS:-100}
+      OTLP_TIMEOUT: ${OTLP_TIMEOUT:-60}
+      OTLP_ENDPOINT: ${OTLP_ENDPOINT:-http://collector:4317}
+    command: ["--pipeline.workers", "${PIPELINE_WORKERS:-4}", "--pipeline.batch.size", "${PIPELINE_BATCH_SIZE:-125}", "--pipeline.ecs_compatibility", "disabled", "--log.level", "info"]
+    ports:
+      - "127.0.0.1:19700:9700"
+      - "127.0.0.1:21600:9600"
+    volumes:
+      - ./logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+    stop_grace_period: 2m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9600/_node/stats/pipelines/main | grep -q '\"events\"'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      - collector
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.131.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "127.0.0.1:21888:8888"
+    volumes:
+      - ./collector.yaml:/etc/otelcol/config.yaml:ro
+
+  exporter:
+    image: quay.io/prometheuscommunity/json-exporter:v0.7.0
+    command: ["--config.file=/config.yml"]
+    ports:
+      - "127.0.0.1:21979:7979"
+    volumes:
+      - ./exporter.yml:/config.yml:ro
+    depends_on:
+      logstash:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=24h"]
+    ports:
+      - "127.0.0.1:21090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - exporter
+      - spring-client
+
+  metrics-collector:
+    image: otel/opentelemetry-collector-contrib:0.131.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "127.0.0.1:21964:9464"
+    volumes:
+      - ./metrics-collector.yaml:/etc/otelcol/config.yaml:ro
+
+  grafana:
+    image: grafana/grafana:12.2.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: light
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: 1s
+    ports:
+      - "127.0.0.1:21300:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
