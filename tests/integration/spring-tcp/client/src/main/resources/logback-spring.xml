@@ -1,0 +1,32 @@
+<configuration>
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level %logger{40} - %msg%n</pattern>
+    </encoder>
+  </appender>
+  <appender name="TCP" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
+    <destination>${LOGSTASH_DESTINATION:-logstash:9700}</destination>
+    <ringBufferSize>${RING_BUFFER_SIZE:-8192}</ringBufferSize>
+    <appendTimeout>${APPEND_TIMEOUT:-0}</appendTimeout>
+    <writeTimeout>${WRITE_TIMEOUT:-60 seconds}</writeTimeout>
+    <reconnectionDelay>1 second</reconnectionDelay>
+    <shutdownGracePeriod>10 seconds</shutdownGracePeriod>
+    <droppedWarnFrequency>10000</droppedWarnFrequency>
+    <listener class="org.otlp.integration.TcpMetricsListener"/>
+    <encoder class="net.logstash.logback.encoder.LoggingEventCompositeJsonEncoder">
+      <providers>
+        <timestamp/>
+        <message/>
+        <logLevel/>
+        <threadName/>
+        <mdc/>
+      </providers>
+    </encoder>
+  </appender>
+  <logger name="load" level="INFO" additivity="false">
+    <appender-ref ref="TCP"/>
+  </logger>
+  <root level="INFO">
+    <appender-ref ref="CONSOLE"/>
+  </root>
+</configuration>

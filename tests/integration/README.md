@@ -12,6 +12,7 @@ the TLS test uses OpenSSL.
 | [timestamps](timestamps/README.md) | Loki deduplication with identical timestamps and the nanosecond fix. |
 | [consumers](consumers/README.md) | Compare consumers, resource use, shutdown/reload with pending records and DNS recovery. |
 | [backpressure](backpressure/README.md) | Compare queue drops with producer blocking under the same load and export latency, then verify recovery. |
+| [spring-tcp](spring-tcp/README.md) | Compare current and tuned configurations at 13,000 logs/s: 4 versus 10 consumers, both with 4 pipeline workers and batches of 300. |
 | [regression-load](regression-load/README.md) | Combine load at a target of 12,000 records/s, Loki timestamp checks and recovery after a 35-second export outage. |
 
 Each README contains the commands to run manually. `Dockerfile` and

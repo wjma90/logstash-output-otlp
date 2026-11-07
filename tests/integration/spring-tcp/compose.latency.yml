@@ -1,0 +1,16 @@
+services:
+  logstash:
+    environment:
+      OTLP_ENDPOINT: http://envoy:4317
+    depends_on:
+      - envoy
+
+  envoy:
+    image: envoyproxy/envoy:v1.35.6
+    command: ["envoy", "-c", "/etc/envoy/envoy.yaml", "--concurrency", "2", "--log-level", "warn"]
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "127.0.0.1:18474:9901"
+    depends_on:
+      - collector
